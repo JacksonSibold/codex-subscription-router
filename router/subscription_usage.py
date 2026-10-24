@@ -16,15 +16,17 @@ from typing import Any, Callable
 import urllib.error
 import urllib.request
 
+import anthropic_adapter
 import anthropic_oauth
 import credentials
+import version
 
 TIMEOUT_SECONDS = 8
 MAX_RESPONSE_BYTES = 1_000_000
 OPENAI_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 KIMI_DEFAULT_BASE_URL = "https://api.kimi.ai/coding/v1"
-USER_AGENT = "Relay/0.3 subscription-usage"
+USER_AGENT = f"Relay/{version.__version__} subscription-usage"
 
 
 class UsageRequestError(RuntimeError):
@@ -263,11 +265,16 @@ def _parse_anthropic(payload: Any) -> list[dict[str, Any]]:
 
 
 def _collect_anthropic() -> dict[str, Any]:
+    account = "Claude Relay OAuth"
     try:
         token = anthropic_oauth.access_token(lambda _message: None)
     except RuntimeError:
-        return _provider("anthropic", "Relay Claude OAuth", "not_connected",
-                         detail="Claude is not connected through Relay OAuth.")
+        try:
+            token = anthropic_adapter.access_token(lambda _message: None)
+            account = "OpenCode fallback"
+        except RuntimeError:
+            return _provider("anthropic", account, "not_connected",
+                             detail="Claude is not connected through Relay OAuth or the OpenCode fallback.")
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
@@ -278,12 +285,12 @@ def _collect_anthropic() -> dict[str, Any]:
     try:
         payload = _get_json(os.environ.get("RELAY_ANTHROPIC_USAGE_URL") or ANTHROPIC_USAGE_URL, headers)
     except UsageRequestError as exc:
-        return _provider("anthropic", "Relay Claude OAuth", "error", detail=str(exc))
+        return _provider("anthropic", account, "error", detail=str(exc))
     windows = _parse_anthropic(payload)
     if not windows:
-        return _provider("anthropic", "Relay Claude OAuth", "unavailable",
+        return _provider("anthropic", account, "unavailable",
                          detail="Claude returned no subscription allowance windows.")
-    return _provider("anthropic", "Relay Claude OAuth", "available", windows=windows)
+    return _provider("anthropic", account, "available", windows=windows)
 
 
 def _parse_kimi(payload: Any) -> list[dict[str, Any]]:

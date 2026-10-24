@@ -19,6 +19,7 @@ import urllib.parse
 import urllib.request
 
 import credentials
+import version
 
 CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 AUTHORIZE_URL = "https://claude.com/cai/oauth/authorize"
@@ -26,7 +27,7 @@ TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 REDIRECT_URI = "https://platform.claude.com/oauth/code/callback"
 SCOPES = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins"
 CREDENTIAL_NAME = "RELAY_ANTHROPIC_OAUTH"
-USER_AGENT = "Relay/0.3 Claude OAuth"
+USER_AGENT = f"Relay/{version.__version__} Claude OAuth"
 FLOW_LIFETIME_SECONDS = 10 * 60
 REFRESH_BUFFER_MS = 5 * 60 * 1000
 _lock = threading.Lock()

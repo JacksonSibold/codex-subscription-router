@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.0 — 2026-10-24
+
+- Promoted Relay to the 1.0 release line with one version source shared by Python, the manager API, the UI build, package metadata, archives, and release validation.
+- Fixed the catalog generator so custom or edited OpenAI and OpenCode upstream IDs are included even when they are absent from `models_cache.json` or `opencode-go-models.json`; every visible route on an enabled provider now receives provider-appropriate catalog metadata.
+- Expanded cross-provider verification to cover OpenAI, OpenCode, Claude, Kimi, and local child routes, including edited upstream IDs and credential isolation.
+- Updated the Usage page to track connected provider accounts and each configured local endpoint even when they have zero requests, aligned inventory with the exact routed-ledger labels, and retained historical account labels after disconnect or removal.
+- Kept Codex, Claude, Kimi, and OpenCode account inventory separate from live subscription percentages, so unsupported allowance APIs remain clearly ledger-only; unexpired legacy OpenCode Anthropic tokens can also populate Claude allowances.
+- Made Claude adapter headers report the actual host OS and CPU architecture, including macOS Apple Silicon, Linux x64, and Windows.
+- Fixed development credential status so keys entered into Relay's isolated development store are detected without reading live user credentials.
+- Added a packaged-archive launch and installer test that extracts each release, starts its manager and router in an isolated home, verifies version, launchers, static UI, API, provider catalog, usage inventory, and router health, then installs into a temporary Codex home and checks preserved configuration.
+- Added Python 3.11 compatibility CI, three-platform package smoke tests, tag/version enforcement, executable-mode checks, release notes, and post-publication download/checksum verification.
+- Updated documentation and release instructions for the portable Windows, Linux, and macOS 1.0 archives.
+
 ## 0.3.0 — 2026-10-24
 
 - Added Relay-owned Claude PKCE OAuth, including manual authorization-code completion, refresh, and expiry handling; OpenCode is no longer required.

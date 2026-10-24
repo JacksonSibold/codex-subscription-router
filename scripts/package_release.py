@@ -27,6 +27,14 @@ def _copy(source: Path, destination: Path) -> None:
     shutil.copy2(source, destination)
 
 
+def _source_version(root: Path) -> str | None:
+    try:
+        value = (root / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return value or None
+
+
 def _instructions(version: str, platform: str) -> str:
     if platform == "windows":
         launch = "Double-click Start Router.cmd, then Start Relay.cmd."
@@ -60,6 +68,9 @@ def package(root: Path, platform: str, version: str, output_dir: Path) -> Path:
         raise ValueError(f"Unsupported platform: {platform}")
     if not VERSION.fullmatch(version):
         raise ValueError("Version must contain only letters, numbers, dots, underscores, and hyphens")
+    declared = _source_version(root)
+    if declared and declared != version:
+        raise ValueError(f"Release version {version} does not match VERSION ({declared})")
     if not (root / "app" / "dist" / "index.html").is_file():
         raise RuntimeError("Build the interface first: cd app && npm ci && npm run build")
 
@@ -71,7 +82,7 @@ def package(root: Path, platform: str, version: str, output_dir: Path) -> Path:
     with tempfile.TemporaryDirectory(prefix=".relay-package-", dir=output_dir) as directory:
         target = Path(directory) / package_name
         target.mkdir()
-        for name in ("README.md", "CHANGELOG.md"):
+        for name in ("README.md", "CHANGELOG.md", "VERSION"):
             _copy(root / name, target / name)
         for name in LAUNCHERS:
             _copy(root / name, target / name)
@@ -116,11 +127,15 @@ def package(root: Path, platform: str, version: str, output_dir: Path) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", choices=PLATFORMS, required=True)
-    parser.add_argument("--version", required=True)
+    parser.add_argument("--version", default=None, help="Release version; defaults to the repository VERSION file")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "release")
     parser.add_argument("--root", type=Path, default=ROOT, help=argparse.SUPPRESS)
     arguments = parser.parse_args()
-    archive = package(arguments.root.resolve(), arguments.platform, arguments.version, arguments.output_dir.resolve())
+    root = arguments.root.resolve()
+    selected_version = arguments.version or _source_version(root)
+    if not selected_version:
+        parser.error("--version is required when the source tree has no VERSION file")
+    archive = package(root, arguments.platform, selected_version, arguments.output_dir.resolve())
     print(f"Built {archive}")
 
 

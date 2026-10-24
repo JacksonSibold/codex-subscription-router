@@ -10,6 +10,7 @@ import json
 import hashlib
 import re
 import os
+import platform
 import threading
 import time
 import urllib.error
@@ -315,7 +316,27 @@ def build_payload(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]
     return payload, tool_kinds
 
 
+def _platform_headers() -> tuple[str, str]:
+    system = platform.system().strip().lower()
+    if system.startswith("win"):
+        os_name = "Windows"
+    elif system == "darwin" or system == "macos":
+        os_name = "MacOS"
+    elif system.startswith("linux"):
+        os_name = "Linux"
+    else:
+        os_name = platform.system().strip() or "Unknown"
+    machine = platform.machine().strip().lower()
+    architecture = {
+        "x86_64": "x64", "amd64": "x64", "x64": "x64",
+        "aarch64": "arm64", "arm64": "arm64",
+        "i386": "x86", "i686": "x86", "x86": "x86",
+    }.get(machine, machine or "unknown")
+    return os_name, architecture
+
+
 def _headers(token: str, session_id: str) -> dict[str, str]:
+    os_name, architecture = _platform_headers()
     return {
         "authorization": "Bearer " + token,
         "anthropic-version": "2023-06-01",
@@ -326,9 +347,9 @@ def _headers(token: str, session_id: str) -> dict[str, str]:
         "content-type": "application/json",
         "accept": "text/event-stream",
         "anthropic-dangerous-direct-browser-access": "true",
-        "x-stainless-arch": "x64",
+        "x-stainless-arch": architecture,
         "x-stainless-lang": "js",
-        "x-stainless-os": "Windows",
+        "x-stainless-os": os_name,
         "x-stainless-package-version": "0.128.0",
         "x-stainless-retry-count": "0",
         "x-stainless-runtime": "node",

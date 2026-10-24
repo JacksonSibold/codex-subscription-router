@@ -50,7 +50,7 @@
 - [x] Add allowlisted release archives, portable launchers, checksums, and tag-triggered GitHub publishing.
 - [x] Add protected current-user credential storage for Linux and macOS.
 - [ ] Add a dedicated uninstaller with preview and rollback support.
-- [x] Formalize release versioning and changelog practice for `0.3.0`.
+- [x] Formalize release versioning and changelog practice for `1.0.0`.
 - [ ] Add signed and notarized native installers.
 
 ## Phase 6 — Accounts, local models, and delegation
@@ -66,9 +66,20 @@
 - [x] Populate Add model with OpenAI, Claude, Kimi, and OpenCode provider catalogs.
 - [x] Apply the blue Relay interface theme.
 - [x] Enable any eligible model as a cross-provider child-agent target.
-- [x] Ship Windows, Linux, and macOS release archives for `0.3.0`.
+- [x] Ship Windows, Linux, and macOS release archives for `1.0.0`.
 
-## Next
+## Phase 7 — Relay 1.0 acceptance
+
+- [x] Audit every requested account, model, OAuth, usage, local-model, delegation, theme, and packaging behavior.
+- [x] Include arbitrary custom/edited provider model IDs in generated catalogs.
+- [x] Show connected accounts with zero routed requests and keep historical ledger labels.
+- [x] Verify all five provider lanes can serve as parent or child routes under catalog eligibility rules.
+- [x] Centralize the release version across Python, UI metadata, health/state APIs, archives, CI, and documentation.
+- [x] Test packaged manager/router startup from Windows, Linux, and macOS archives.
+- [x] Publish downloadable checksums and verify the published assets after release.
+- [x] Draft complete 1.0.0 release notes with honest archive and compatibility limits.
+
+## Post-1.0
 
 1. Implement automatic rollback and a backup browser.
 2. Add a tested cross-platform uninstaller that never deletes provider credential stores.

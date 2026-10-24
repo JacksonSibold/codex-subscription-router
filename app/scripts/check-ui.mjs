@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 const app = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const root = resolve(app, '..');
 const artifacts = resolve(root, 'artifacts');
+const expectedVersion = readFileSync(resolve(root, 'VERSION'), 'utf8').trim();
 mkdirSync(artifacts, { recursive: true });
 const child = spawn(process.execPath, [resolve(app, 'scripts/dev.mjs'), '--host', '127.0.0.1', '--port', '7100'], {
   cwd: app, stdio: ['ignore', 'pipe', 'pipe'],
@@ -33,9 +34,11 @@ try {
   }
   if (!state) throw new Error('Development app did not become ready');
   if (state.settings.models.length !== 11) throw new Error('Default model settings did not load');
+  if (state.version !== expectedVersion) throw new Error(`Manager version ${state.version} did not match ${expectedVersion}`);
   if (state.live_apply !== false) throw new Error('Preview must use isolated development mode');
   if (!state.providers.local) throw new Error('Local provider was not exposed by the manager');
   if (typeof state.usage?.totals?.requests !== 'number') throw new Error('Usage dashboard was not exposed by the manager');
+  if (!Array.isArray(state.usage?.accounts) || state.usage.accounts.length < 5) throw new Error('Usage account inventory was incomplete');
   for (const provider of ['openai', 'anthropic', 'kimi']) {
     if (!state.available_models?.some(model => model.provider === provider)) {
       throw new Error(`Add-model catalog did not include ${provider}`);

@@ -32,6 +32,8 @@ jobs:
           cache-dependency-path: app/package-lock.json
       - name: Python regression tests
         run: python -m unittest discover -s tests -v
+      - name: Source and credential validation
+        run: python scripts/validate.py
       - name: Install interface dependencies
         working-directory: app
         run: npm ci
@@ -43,6 +45,15 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           python scripts/package_release.py --platform "${{ matrix.platform }}" --version "$VERSION"
+      - name: Verify archive from an isolated extraction
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            python scripts/verify_release.py "release/relay-${VERSION}-windows.zip"
+          else
+            python scripts/verify_release.py "release/relay-${VERSION}-${{ matrix.platform }}.tar.gz"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: relay-${{ matrix.platform }}
@@ -53,6 +64,7 @@ jobs:
     needs: package
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
           path: release
@@ -66,8 +78,23 @@ jobs:
         run: |
           TAG="$GITHUB_REF_NAME"
           REPO="$GITHUB_REPOSITORY"
+          NOTES="docs/releases/${TAG#v}.md"
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             gh release upload "$TAG" release/* --repo "$REPO" --clobber
+          elif [ -f "$NOTES" ]; then
+            gh release create "$TAG" release/* --repo "$REPO" --title "Relay $TAG" --notes-file "$NOTES" --verify-tag
           else
             gh release create "$TAG" release/* --repo "$REPO" --title "Relay $TAG" --generate-notes --verify-tag
           fi
+
+  verify-assets:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download every published asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir downloaded
+      - name: Verify downloadable checksums
+        working-directory: downloaded
+        run: sha256sum -c SHA256SUMS.txt

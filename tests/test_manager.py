@@ -45,6 +45,8 @@ class ManagerTests(unittest.TestCase):
                     self.assertNotIn("refresh", serialized.lower())
                     self.assertNotIn("access_token", serialized.lower())
                     self.assertEqual(len(state["settings"]["models"]), 11)
+                    self.assertEqual(state["version"], "1.0.0")
+                    self.assertGreaterEqual(len(state["usage"]["accounts"]), 5)
                     request = urllib.request.Request(base + "/api/settings", data=b"{}", method="POST")
                     with self.assertRaises(urllib.error.HTTPError) as caught:
                         urllib.request.urlopen(request)
@@ -71,6 +73,19 @@ class ManagerTests(unittest.TestCase):
             self.assertEqual(providers["opencode"]["status"], "not_configured")
             self.assertEqual(providers["kimi"]["status"], "not_configured")
 
+    def test_development_credentials_are_read_only_from_the_isolated_override(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            credential_file = home / "credentials.json"
+            credential_file.write_text('{"KIMI_API_KEY": "isolated-test-value"}', encoding="utf-8")
+            with patch.object(manager.router, "CODEX_HOME", str(home)), \
+                 patch.object(manager, "OPENCODE_AUTH_PATH", home / "opencode-auth.json"), \
+                 patch.dict(os.environ, {"CODEX_ROUTER_DEV": "1", "CODEX_ROUTER_CREDENTIALS": str(credential_file)}), \
+                 patch.object(manager.anthropic_oauth, "credential_status", return_value=None):
+                providers = manager.provider_state()
+            self.assertEqual(providers["kimi"]["status"], "credential_found")
+            self.assertEqual(providers["opencode"]["status"], "not_configured")
+
     def test_usage_api_aggregates_all_provider_accounts(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
@@ -79,7 +94,16 @@ class ManagerTests(unittest.TestCase):
                                {"input_tokens": 10, "output_tokens": 5})
             usage_store.record(database, "local", "Local · 127.0.0.1:11434", "local-llama", 200,
                                {"input_tokens": 7, "output_tokens": 3})
-            with patch.dict(os.environ, {"CODEX_ROUTER_USAGE_DB": str(database)}):
+            providers = {
+                "openai": {"status": "credential_found", "detail": "hidden"},
+                "anthropic": {"status": "credential_found", "detail": "hidden"},
+                "kimi": {"status": "not_configured", "detail": "hidden"},
+                "opencode": {"status": "not_configured", "detail": "hidden"},
+                "local": {"status": "ready", "detail": "hidden"},
+            }
+            with patch.dict(os.environ, {"CODEX_ROUTER_USAGE_DB": str(database)}), \
+                 patch.object(manager, "provider_state", return_value=providers), \
+                 patch.object(manager, "SETTINGS_PATH", home / "router-settings.json"):
                 server = ThreadingHTTPServer(("127.0.0.1", 0), manager.Handler)
                 thread = threading.Thread(target=server.serve_forever, daemon=True)
                 thread.start()
@@ -93,7 +117,47 @@ class ManagerTests(unittest.TestCase):
             self.assertEqual(dashboard["totals"]["requests"], 2)
             self.assertEqual(dashboard["totals"]["total_tokens"], 25)
             self.assertEqual({row["provider"] for row in dashboard["providers"]}, {"anthropic", "local"})
+            self.assertEqual(dashboard["connected_accounts"], 2)
+            self.assertEqual({row["provider"] for row in dashboard["accounts"]}, {"openai", "anthropic", "kimi", "opencode", "local"})
+            anthropic = next(row for row in dashboard["accounts"] if row["provider"] == "anthropic")
+            self.assertEqual(anthropic["requests"], 1)
+            self.assertFalse(anthropic["historical"])
             self.assertNotIn("test-access", json.dumps(dashboard))
+
+    def test_usage_inventory_tracks_zero_usage_accounts_and_each_local_endpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            document = manager.settings.default_settings()
+            for route_id, endpoint in (("local-one", "http://127.0.0.1:11434/v1"),
+                                       ("local-two", "http://127.0.0.1:1234/v1")):
+                route = manager.settings._model(route_id, "local", route_id, "medium", ["low", "medium", "high"])
+                route["local"] = {"endpoint": endpoint, "protocol": "openai_chat", "credential_env": None}
+                document["models"].append(route)
+            settings_path = home / "router-settings.json"
+            manager.settings.save(settings_path, document)
+            database = home / "usage.sqlite"
+            usage_store.record(database, "openai", manager.router.USAGE_ACCOUNT_LABELS["openai"], "gpt-test", 200,
+                               {"input_tokens": 3, "output_tokens": 2})
+            providers = {
+                "openai": {"status": "credential_found", "detail": "Codex account"},
+                "anthropic": {"status": "credential_found", "detail": "Claude OAuth"},
+                "kimi": {"status": "credential_found", "detail": "Kimi key"},
+                "opencode": {"status": "credential_found", "detail": "OpenCode key"},
+                "local": {"status": "ready", "detail": "Two endpoints"},
+            }
+            with patch.object(manager, "SETTINGS_PATH", settings_path), \
+                 patch.dict(os.environ, {"CODEX_ROUTER_USAGE_DB": str(database)}):
+                dashboard = manager.usage_dashboard(30, providers)
+            self.assertEqual(dashboard["connected_accounts"], 6)
+            self.assertEqual(len(dashboard["accounts"]), 6)
+            local_accounts = [row for row in dashboard["accounts"] if row["provider"] == "local"]
+            self.assertEqual(len(local_accounts), 2)
+            self.assertTrue(all(row["connected"] for row in local_accounts))
+            codex = next(row for row in dashboard["accounts"]
+                         if row["account"] == manager.router.USAGE_ACCOUNT_LABELS["openai"])
+            self.assertEqual(codex["total_tokens"], 5)
+            self.assertFalse(codex["historical"])
+            self.assertTrue(all(row["total_tokens"] == 0 for row in dashboard["accounts"] if row is not codex))
 
     def test_subscription_usage_endpoint_is_sanitized_and_covers_all_lanes(self):
         snapshot = {

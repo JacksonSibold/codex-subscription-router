@@ -2,7 +2,7 @@
 
 Relay is a local, cross-platform router that puts OpenAI, OpenCode Go, Claude plans, Kimi Code, and local OpenAI-compatible models behind one Codex model picker. Each request stays on its own provider lane, with its own credential and protocol adapter.
 
-> **Project status:** Relay 0.3.0 is the current release line for Windows, Linux, and macOS. The desktop archives are unsigned portable bundles and require Python 3.11 or newer. Signed/notarized native installers, a dedicated uninstaller, and automatic transactional rollback remain future work.
+> **Project status:** Relay 1.0.0 is the current release for Windows, Linux, and macOS. The desktop archives are unsigned portable bundles and require Python 3.11 or newer. Signed/notarized native installers, a dedicated uninstaller, and automatic transactional rollback remain post-1.0 work.
 
 Relay is an independent project, not an OpenAI, Anthropic, Kimi, or OpenCode product. Provider eligibility, billing rules, model identifiers, and API behavior remain controlled by each provider.
 
@@ -12,9 +12,9 @@ Relay is an independent project, not an OpenAI, Anthropic, Kimi, or OpenCode pro
 - Connects any eligible Claude plan directly with Relay-owned PKCE OAuth; OpenCode is not required.
 - Adds Ollama, LM Studio, and custom loopback OpenAI-compatible models.
 - Discovers local models from `/v1/models`.
-- Tracks provider-reported subscription allowances plus routed token usage across every configured account and local endpoint.
-- Supports model editing, stable picker route IDs, editable upstream model IDs, and a grouped add-model dropdown populated with OpenAI, Claude, Kimi, and OpenCode provider catalogs.
-- Enables cross-provider subagents: an eligible Claude parent can target a Kimi child, an OpenAI parent can target a local model, and so on.
+- Tracks provider-reported subscription allowances plus routed token usage across every configured account and local endpoint, including connected lanes with zero recorded requests.
+- Supports model editing, stable picker route IDs, editable upstream model IDs, and a grouped add-model dropdown populated with OpenAI, Claude, Kimi, and OpenCode provider catalogs. Custom model IDs are cataloged even when a provider cache has not seen them yet.
+- Enables cross-provider subagents through the same catalog: any visible, enabled, subagent-eligible route can be used as a child from any provider lane.
 - Keeps credentials isolated by provider and never forwards a ChatGPT credential to a third-party or local endpoint.
 - Generates the Codex catalog from credential-free preferences, with atomic saves, backups, validation, and a guarded Apply flow.
 - Avoids restarting Codex during ordinary save, apply, and catalog reload operations.
@@ -29,11 +29,11 @@ Relay is an independent project, not an OpenAI, Anthropic, Kimi, or OpenCode pro
 
 The archives contain a static production UI, Python router, installer, launchers, examples, and open-source model catalog. They do not contain provider credentials, OAuth tokens, logs, local settings, generated catalogs, usage databases, or build dependencies.
 
-Download the archive for your OS from [GitHub Releases](https://github.com/JacksonSibold/codex-subscription-router/releases/latest):
+Download the 1.0.0 archive for your OS from [GitHub Releases](https://github.com/JacksonSibold/codex-subscription-router/releases/latest):
 
-- `relay-<version>-windows.zip`
-- `relay-<version>-linux.tar.gz`
-- `relay-<version>-macos.tar.gz`
+- `relay-1.0.0-windows.zip`
+- `relay-1.0.0-linux.tar.gz`
+- `relay-1.0.0-macos.tar.gz`
 - `SHA256SUMS.txt`
 
 These are portable archives, not signed `.exe`, `.msi`, `.dmg`, or package-manager installers.
@@ -77,14 +77,14 @@ This enables combinations such as:
 - OpenCode parent → Claude child
 - Kimi parent → OpenAI child
 
-A model must be visible, its provider enabled, and its subagent control enabled to be selectable as a child. This is catalog eligibility, not a separate per-model allowlist.
+A model must be visible, its provider enabled, and its subagent control enabled to be selectable as a child. This is catalog eligibility, not a separate per-provider allowlist. Any model from any lane can be a parent or child, subject to those controls; the parent request is routed to the child by its stable Relay route ID and each child keeps its own provider credential.
 
 ## Relay management app
 
 - **Overview:** provider readiness, picker inventory, usage, and router state.
 - **Connections:** Codex sign-in, Relay-owned Claude OAuth, Kimi/OpenCode key forms, and local endpoint summary.
 - **Model picker:** provider-populated add-model dropdown, click-to-edit rows, editable upstream IDs, show/hide, ordering, defaults, endpoint/protocol editing, and per-model policies.
-- **Usage:** live Codex, Claude, and Kimi subscription allowances; token totals; per-provider/account activity; daily chart; model distribution; and recent request status.
+- **Usage:** live Codex, Claude, and Kimi subscription allowances; connected accounts even before their first request; token totals; per-provider/account activity; daily chart; model distribution; and recent request status.
 - **Capabilities:** honest per-provider tool and delegation behavior.
 - **Diagnostics:** loopback health, sanitized logs, safe settings export, and local file locations.
 
@@ -149,7 +149,7 @@ Use `--codex-home <path>` for an isolated installation.
 
 ## Usage and allowances
 
-Relay reads live plan allowance percentages and reset times from Codex, Claude OAuth, and Kimi Code where the provider exposes them. OpenCode and local lanes show routed token activity without claiming a subscription percentage.
+Relay reads live plan allowance percentages and reset times from Codex, Claude OAuth (including an unexpired legacy OpenCode Anthropic token), and Kimi Code where the provider exposes them. OpenCode and local lanes show routed token activity without claiming a subscription percentage.
 
 Relay also records, for each routed request:
 
@@ -160,6 +160,8 @@ Relay also records, for each routed request:
 - input, cached, output, reasoning, and total token counts when the upstream exposes them
 
 Prompts, responses, API keys, and OAuth tokens are not stored in the allowance response or the ledger. Allowance requests disable redirects so a provider credential cannot be forwarded to another host. The default runtime database is `model-router/router-usage.sqlite` (or the project-local equivalent). Override it with `CODEX_ROUTER_USAGE_DB`.
+
+The Usage page separates connected account inventory from routed activity. A Codex, Claude, Kimi, or OpenCode account appears before its first request, and each configured local endpoint is tracked independently. Historical account labels are retained even after a credential or endpoint is removed; OpenCode and local lanes remain ledger-only because they do not expose a subscription-percentage API through Relay.
 
 ## Development
 
@@ -191,13 +193,17 @@ npm run build
 npm run test:ui
 ```
 
+The GitHub Actions matrix repeats Python tests, source validation, the production build, rendered UI checks, and an isolated package launch test on Windows, Linux, and macOS. A separate Python 3.11 compatibility job validates the minimum documented runtime.
+
 Build local release archives:
 
 ```bash
-python scripts/package_release.py --platform windows --version 0.3.0
-python scripts/package_release.py --platform linux --version 0.3.0
-python scripts/package_release.py --platform macos --version 0.3.0
+python scripts/package_release.py --platform windows
+python scripts/package_release.py --platform linux
+python scripts/package_release.py --platform macos
+python scripts/verify_release.py release/relay-1.0.0-windows.zip
 ```
+The package script defaults to the repository `VERSION` file and rejects a tag/version mismatch. `scripts/verify_release.py` extracts an archive into an isolated directory, checks launcher modes and forbidden runtime files, starts the packaged manager and router, and verifies the UI, API, catalog, version, and usage inventory. It also runs the shipped installer against a temporary Codex home, confirms configuration preservation, and launches the installed manager layout.
 
 ## Apply and rollback behavior
 
@@ -234,6 +240,17 @@ scripts/
 tests/                       Python regression, routing, OAuth, local, usage, package tests
 .github/workflows/           Three-OS CI and tag-triggered release publication
 ```
+
+## Release verification
+
+Relay 1.0.0 is released only after all of these checks pass:
+
+- 60+ Python regression tests, source validation, the production UI build, and rendered UI checks.
+- Native CI and an isolated packaged-manager/router plus installer smoke test on each of Windows, Linux, and macOS.
+- Tag/version consistency, archive allowlists, Unix executable modes, and SHA-256 checks.
+- A post-publication workflow that downloads the three published assets back from GitHub and verifies `SHA256SUMS.txt`.
+
+The artifacts are portable archives. They are not signed `.exe`, `.msi`, `.pkg`, `.dmg`, or package-manager installers.
 
 ## Credentials and privacy
 

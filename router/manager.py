@@ -31,6 +31,7 @@ import router
 import settings
 import subscription_usage
 import usage_store
+import version
 
 HERE = Path(__file__).resolve().parent
 SETTINGS_PATH = Path(os.environ.get("CODEX_ROUTER_SETTINGS") or HERE / "router-settings.json")
@@ -79,8 +80,8 @@ def provider_state() -> dict[str, dict[str, Any]]:
         item["detail"] = "No local credential found"
         if provider in ("opencode", "kimi"):
             variable = "OPENCODE_API_KEY" if provider == "opencode" else "KIMI_API_KEY"
-            # The development UI is isolated from the machine's live credential stores.
-            if not development and _user_env(variable):
+            # The development UI reads only its explicit isolated file, never the live registry.
+            if (not development or os.environ.get("CODEX_ROUTER_CREDENTIALS")) and _user_env(variable):
                 item.update(status="credential_found", detail=f"{variable} found; value hidden")
         elif provider == "openai":
             if (Path(router.CODEX_HOME) / "auth.json").exists():
@@ -145,13 +146,29 @@ BUILTIN_MODELS = (
 
 
 def available_models() -> list[dict[str, str]]:
-    """Return built-in and locally cached provider models for the add menu.
+    """Return built-in, configured, and locally cached provider models for the add menu.
 
-    Entries remain listed even when already configured so every provider has a
-    visible catalog. The interface marks configured routes instead of hiding
-    them, which avoids a misleading empty OpenAI or Claude section.
+    The menu must remain useful before a provider cache exists and after a user
+    edits an upstream ID. Configured routes and the shipped defaults therefore
+    supplement the live Codex/OpenCode catalogs.
     """
     output = [dict(model) for model in BUILTIN_MODELS]
+    for document in (settings.default_settings(),):
+        output.extend({
+            "id": model["upstream_id"],
+            "provider": model["provider"],
+            "name": model["display_name"],
+        } for model in document["models"])
+    try:
+        configured = settings.load(SETTINGS_PATH)
+    except (OSError, ValueError):
+        configured = None
+    if configured:
+        output.extend({
+            "id": model["upstream_id"],
+            "provider": model["provider"],
+            "name": model["display_name"],
+        } for model in configured["models"] if model["provider"] != "local")
     for filename, provider in (("models_cache.json", "openai"), ("opencode-go-models.json", "opencode")):
         path = Path(router.CODEX_HOME) / filename
         try:
@@ -173,6 +190,80 @@ def available_models() -> list[dict[str, str]]:
 
 def usage_path() -> Path:
     return Path(os.environ.get("CODEX_ROUTER_USAGE_DB") or router.USAGE_PATH)
+
+
+def usage_account_inventory(document: dict[str, Any] | None = None,
+                           providers: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Describe every provider account and local endpoint, including zero-usage ones."""
+    document = document or settings.load(SETTINGS_PATH)
+    providers = providers or provider_state()
+    inventory: list[dict[str, Any]] = []
+    labels = {
+        "openai": router.USAGE_ACCOUNT_LABELS["openai"],
+        "opencode": router.USAGE_ACCOUNT_LABELS["opencode"],
+        "anthropic": router.USAGE_ACCOUNT_LABELS["anthropic"],
+        "kimi": router.USAGE_ACCOUNT_LABELS["kimi"],
+    }
+    for provider in PROVIDERS:
+        state = providers.get(provider, {})
+        status = str(state.get("status") or "unknown")
+        if provider == "anthropic" and str(state.get("detail") or "").startswith("Legacy OpenCode"):
+            account = router.USAGE_ACCOUNT_LABELS["anthropic_fallback"]
+        elif provider == "local":
+            routes = [model for model in document["models"] if model["provider"] == "local"]
+            endpoints: dict[str, dict[str, Any]] = {}
+            for model in routes:
+                account = router.usage_account("local", model)
+                endpoints.setdefault(account, model)
+            if not endpoints:
+                endpoints["Local endpoints"] = None
+            for account, model in endpoints.items():
+                inventory.append({
+                    "provider": provider,
+                    "account": account,
+                    "status": status,
+                    "detail": state.get("detail"),
+                    "connected": bool(endpoints and model is not None and status == "ready"),
+                    "provider_enabled": bool(document["providers"][provider]["enabled"]),
+                    "historical": False,
+                })
+            continue
+        else:
+            account = labels[provider]
+        inventory.append({
+            "provider": provider,
+            "account": account,
+            "status": status,
+            "detail": state.get("detail"),
+            "connected": status == "credential_found",
+            "provider_enabled": bool(document["providers"][provider]["enabled"]),
+            "historical": False,
+        })
+    return inventory
+
+
+def usage_dashboard(days: int, providers: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Merge configured account inventory with routed activity from the ledger."""
+    result = usage_store.dashboard(usage_path(), days)
+    document = settings.load(SETTINGS_PATH)
+    inventory = usage_account_inventory(document, providers)
+    activity = {(row["provider"], row["account"]): row for row in result.get("providers", [])}
+    accounts: list[dict[str, Any]] = []
+    order = {provider: index for index, provider in enumerate(PROVIDERS)}
+    zero = {"requests": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "last_used": None}
+    for item in inventory:
+        row = activity.pop((item["provider"], item["account"]), {})
+        accounts.append({**zero, **item, **row, "connected": item["connected"], "historical": False})
+    for row in activity.values():
+        accounts.append({**row, "connected": False, "provider_enabled": False, "historical": True,
+                         "status": "historical", "detail": "This account appears in earlier routed activity."})
+    accounts.sort(key=lambda row: (
+        not row.get("connected", False), row.get("historical", False), order.get(row.get("provider"), 99),
+        str(row.get("account") or ""),
+    ))
+    result["accounts"] = accounts
+    result["connected_accounts"] = sum(1 for row in accounts if row.get("connected"))
+    return result
 
 
 def start_claude_oauth() -> dict[str, Any]:
@@ -218,6 +309,7 @@ def discover_local(endpoint: Any) -> list[dict[str, str]]:
 
 def state() -> dict[str, Any]:
     document = settings.load(SETTINGS_PATH)
+    providers = provider_state()
     catalog_path = Path(router.CODEX_HOME) / "mixed-models.json"
     try:
         with catalog_path.open(encoding="utf-8") as handle:
@@ -225,15 +317,16 @@ def state() -> dict[str, Any]:
     except (OSError, ValueError):
         catalog = []
     return {
+        "version": version.__version__,
         "settings": document,
-        "providers": provider_state(),
+        "providers": providers,
         "router": router_health(),
         "catalog": [{"id": m.get("slug"), "name": m.get("display_name")} for m in catalog],
         "available_models": available_models(),
         "settings_location": str(SETTINGS_PATH),
         "catalog_location": str(catalog_path),
         "usage_location": str(usage_path()),
-        "usage": usage_store.dashboard(usage_path(), 30),
+        "usage": usage_dashboard(30, providers),
         "live_apply": os.environ.get("CODEX_ROUTER_DEV") != "1",
     }
 
@@ -327,7 +420,7 @@ class Handler(BaseHTTPRequestHandler):
                     days = max(1, min(365, int((query.get("days") or ["30"])[0])))
                 except ValueError:
                     raise ValueError("Usage days must be an integer from 1 through 365") from None
-                self.reply(200, usage_store.dashboard(usage_path(), days))
+                self.reply(200, usage_dashboard(days))
             elif parsed.path == "/api/subscription-usage":
                 self.reply(200, subscription_usage.collect(router.CODEX_HOME))
             elif parsed.path == "/api/diagnostics":

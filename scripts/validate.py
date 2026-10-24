@@ -11,6 +11,17 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "router"))
 import settings
+import version
+
+release_version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", release_version), "VERSION must be semantic x.y.z"
+assert version.__version__ == release_version, "runtime version does not match VERSION"
+package = json.loads((ROOT / "app" / "package.json").read_text(encoding="utf-8"))
+lock = json.loads((ROOT / "app" / "package-lock.json").read_text(encoding="utf-8"))
+assert package["version"] == release_version, "app/package.json version does not match VERSION"
+assert lock["version"] == release_version and lock["packages"][""]["version"] == release_version, "package-lock version does not match VERSION"
+assert "__RELAY_VERSION__" in (ROOT / "app" / "src" / "App.jsx").read_text(encoding="utf-8"), "UI version injection is missing"
+print(f"PASS release version {release_version} is consistent across Python and UI metadata")
 
 for folder in ("router", "scripts", "tests"):
     for source in (ROOT / folder).glob("*.py"):

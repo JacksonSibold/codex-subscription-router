@@ -29,6 +29,7 @@ import local_adapter
 import namespace_tools
 import settings as router_settings
 import usage_store
+import version
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CODEX_HOME = os.environ.get("CODEX_HOME") or os.path.dirname(HERE)
@@ -111,15 +112,78 @@ def _read_json(path, fallback):
         return fallback
 
 
+GENERIC_CATALOG_MODEL = {
+    "description": "Model routed through Relay",
+    "default_reasoning_level": "medium",
+    "supported_reasoning_levels": [],
+    "shell_type": "unified_exec",
+    "visibility": "list",
+    "supported_in_api": True,
+    "availability_nux": None,
+    "upgrade": None,
+    "include_skills_usage_instructions": False,
+    "include_plugin_usage_instructions": False,
+    "include_apps_usage_instructions": False,
+    "default_reasoning_summary": "none",
+    "support_verbosity": False,
+    "default_verbosity": "medium",
+    "apply_patch_tool_type": "freeform",
+    "web_search_tool_type": "text_and_image",
+    "truncation_policy": {"mode": "bytes", "limit": 10000},
+    "supports_image_detail_original": False,
+    "context_window": 200000,
+    "max_context_window": 200000,
+    "comp_hash": "0",
+    "effective_context_window_percent": 95,
+    "experimental_supported_tools": [],
+    "input_modalities": ["text", "image"],
+    "supports_search_tool": False,
+    "supports_experimental_context": False,
+    "use_responses_lite": True,
+    "supports_reasoning_effort_updates": True,
+    "node_repl_auto_review_required": False,
+    "node_repl_disabled": False,
+    "tool_mode": "code_mode_only",
+    "multi_agent_version": "disabled",
+}
+
+
+def _catalog_base(provider, upstream_id, cache, go):
+    """Return provider-appropriate metadata even for a model absent from local caches.
+
+    Provider catalogs change frequently, and users can deliberately enter an
+    upstream ID that the local cache does not know yet. Falling back to another
+    entry from the same provider keeps Codex wire behavior consistent; the final
+    slug, names, reasoning, tools, and subagent settings are always overwritten
+    from Relay preferences below.
+    """
+    generic = copy.deepcopy(GENERIC_CATALOG_MODEL)
+    if provider == "openai":
+        return copy.deepcopy(cache.get(upstream_id) or next(iter(cache.values()), None) or generic)
+    if provider == "opencode":
+        item = copy.deepcopy(go.get(upstream_id) or next(iter(go.values()), None) or generic)
+        item.update(OPENCODE_CATALOG_OVERRIDES)
+        return item
+    return generic
+
+
+def _catalog_map(filename):
+    document = _read_json(os.path.join(CODEX_HOME, filename), {"models": []})
+    models = document.get("models") if isinstance(document, dict) else None
+    if not isinstance(models, list):
+        return {}
+    return {
+        item["slug"]: item
+        for item in models
+        if isinstance(item, dict) and isinstance(item.get("slug"), str) and item["slug"]
+    }
+
+
 def build_catalog(document=None, output_path=None):
     """Build the ordered picker without changing Codex's configuration or restarting it."""
     document = document or ACTIVE_SETTINGS
-    cache = {m["slug"]: m for m in _read_json(os.path.join(CODEX_HOME, "models_cache.json"), {"models": []})["models"]}
-    go = {m["slug"]: m for m in _read_json(os.path.join(CODEX_HOME, "opencode-go-models.json"), {"models": []})["models"]}
-    template = copy.deepcopy(go.get("deepseek-v4.1-flash") or next(iter(go.values()), None) or {
-        "shell_type": "unified_exec", "apply_patch_tool_type": "freeform",
-        "input_modalities": ["text", "image"], "supported_in_api": True,
-    })
+    cache = _catalog_map("models_cache.json")
+    go = _catalog_map("opencode-go-models.json")
     picks = []
     descriptions = {
         "openai": "OpenAI model through your existing Codex sign-in",
@@ -134,16 +198,8 @@ def build_catalog(document=None, output_path=None):
             continue
         slug = preference["id"]
         upstream_id = preference["upstream_id"]
-        if provider == "openai":
-            if upstream_id not in cache:
-                continue
-            item = copy.deepcopy(cache[upstream_id])
-        elif provider == "opencode":
-            if upstream_id not in go:
-                continue
-            item = {**copy.deepcopy(go[upstream_id]), **OPENCODE_CATALOG_OVERRIDES}
-        else:
-            item = copy.deepcopy(template)
+        item = _catalog_base(provider, upstream_id, cache, go)
+        if provider != "openai":
             item.update({"supported_in_api": True, "input_modalities": ["text", "image"],
                          "supports_reasoning_effort_updates": True, "supports_search_tool": False})
             if provider == "anthropic":
@@ -200,16 +256,21 @@ def kimi_key():
     return _required_key("KIMI_API_KEY")
 
 
+USAGE_ACCOUNT_LABELS = {
+    "openai": "Codex account",
+    "opencode": "OpenCode API key",
+    "kimi": "Kimi API key",
+    "anthropic": "Claude Relay OAuth",
+    "anthropic_fallback": "OpenCode fallback",
+}
+
+
 def usage_account(lane, preference=None):
     """Return a stable, non-secret account label for the usage ledger."""
-    if lane == "openai":
-        return "Codex account"
-    if lane == "opencode":
-        return "OpenCode API key"
-    if lane == "kimi":
-        return "Kimi API key"
     if lane == "anthropic":
-        return "Claude Relay OAuth" if anthropic_oauth.load_tokens() else "OpenCode fallback"
+        return USAGE_ACCOUNT_LABELS["anthropic"] if anthropic_oauth.load_tokens() else USAGE_ACCOUNT_LABELS["anthropic_fallback"]
+    if lane in USAGE_ACCOUNT_LABELS:
+        return USAGE_ACCOUNT_LABELS[lane]
     if lane == "local" and preference:
         endpoint = preference.get("local", {}).get("endpoint", "")
         host = urlsplit(endpoint).netloc or "local endpoint"
@@ -404,7 +465,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/__router_health":
             self.respond_json(200, {"namespace_bridge": namespace_tools.VERSION, "pid": os.getpid(),
-                                    "models": len(enabled_models()), "settings_version": ACTIVE_SETTINGS["version"]})
+                                    "models": len(enabled_models()), "settings_version": ACTIVE_SETTINGS["version"],
+                                    "relay_version": version.__version__})
             return
         self.route(b"")
 

@@ -11,6 +11,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "router"))
 import subscription_usage
+import anthropic_adapter
 
 
 class SubscriptionUsageTests(unittest.TestCase):
@@ -53,6 +54,7 @@ class SubscriptionUsageTests(unittest.TestCase):
     def test_collect_reports_all_five_lanes_without_credentials(self):
         with tempfile.TemporaryDirectory() as directory, \
              patch.object(subscription_usage.anthropic_oauth, "access_token", side_effect=RuntimeError("missing")), \
+             patch.object(subscription_usage.anthropic_adapter, "access_token", side_effect=RuntimeError("missing")), \
              patch.object(subscription_usage.credentials, "get_secret", return_value=None), \
              patch.object(subscription_usage, "_get_json") as request:
             result = subscription_usage.collect(directory)
@@ -101,6 +103,33 @@ class SubscriptionUsageTests(unittest.TestCase):
             self.assertEqual(kimi_call["Authorization"], "Bearer kimi-test-token")
             self.assertNotIn("codex-test-token", json.dumps(anthropic_call))
             self.assertNotIn("codex-test-token", json.dumps(kimi_call))
+
+    def test_collect_uses_unexpired_opencode_anthropic_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            auth_path = home / "opencode-auth.json"
+            auth_path.write_text(json.dumps({"anthropic": {
+                "type": "oauth", "access": "fallback-access", "refresh": "fallback-refresh",
+                "expires": 2_000_000_000_000,
+            }}), encoding="utf-8")
+            calls: dict[str, dict[str, str]] = {}
+
+            def fake_json(url: str, headers: dict[str, str]):
+                calls[url] = headers
+                return {"five_hour": {"utilization": 25}}
+
+            with patch.object(subscription_usage.anthropic_oauth, "access_token",
+                              side_effect=RuntimeError("Relay OAuth missing")), \
+                 patch.object(anthropic_adapter, "AUTH_PATH", auth_path), \
+                 patch.object(subscription_usage.credentials, "get_secret", return_value=None), \
+                 patch.object(subscription_usage, "_get_json", side_effect=fake_json):
+                result = subscription_usage.collect(home)
+            anthropic = next(row for row in result["providers"] if row["provider"] == "anthropic")
+            self.assertEqual(anthropic["account"], "OpenCode fallback")
+            self.assertEqual(anthropic["status"], "available")
+            anthropic_call = next(headers for url, headers in calls.items() if "anthropic.com" in url)
+            self.assertEqual(anthropic_call["Authorization"], "Bearer fallback-access")
+            self.assertNotIn("fallback-access", json.dumps(result))
 
 
 if __name__ == "__main__":

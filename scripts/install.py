@@ -101,6 +101,9 @@ def install(codex_home: Path, configure: bool) -> None:
         if destination.exists():
             shutil.copy2(destination, destination.with_name(destination.name + ".backup-" + STAMP))
         shutil.copy2(source, destination)
+    version_source = ROOT / "VERSION"
+    if version_source.is_file():
+        shutil.copy2(version_source, target / "VERSION")
     if (target / "app").exists():
         shutil.rmtree(target / "app")
     shutil.copytree(static, target / "app")
@@ -127,7 +130,8 @@ def install(codex_home: Path, configure: bool) -> None:
     print(f"Installed Relay in {target}")
     print(f"Generated {len(models)} picker entries in {codex_home / 'mixed-models.json'}")
     print("Codex and the running router were not restarted. Start the new router when convenient.")
-    print(f"Management app: {codex_home / 'Start Relay.cmd'}")
+    launcher = "Start Relay.cmd" if os.name == "nt" else "Start Relay.sh"
+    print(f"Management app: {codex_home / launcher}")
 
 
 def main() -> None:

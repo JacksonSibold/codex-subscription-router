@@ -22,6 +22,12 @@ import usage_store
 
 
 class RouterTests(unittest.TestCase):
+    def test_usage_account_labels_follow_the_active_anthropic_credential_source(self):
+        with patch.object(router.anthropic_oauth, "load_tokens", return_value={"access": "hidden"}):
+            self.assertEqual(router.usage_account("anthropic"), router.USAGE_ACCOUNT_LABELS["anthropic"])
+        with patch.object(router.anthropic_oauth, "load_tokens", return_value=None):
+            self.assertEqual(router.usage_account("anthropic"), router.USAGE_ACCOUNT_LABELS["anthropic_fallback"])
+
     def test_namespace_bridge_self_test(self):
         namespace_tools.self_test()
 
@@ -81,6 +87,73 @@ class RouterTests(unittest.TestCase):
                 self.assertEqual([level["effort"] for level in claude["supported_reasoning_levels"]], ["low", "medium", "high", "xhigh", "max"])
             finally:
                 router.CODEX_HOME = original_home
+
+    def test_catalog_synthesizes_any_custom_upstream_id_across_all_providers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            document = settings.default_settings()
+            routes = [
+                settings._model("custom-openai", "openai", "Custom OpenAI", "medium", ["low", "medium", "high"]),
+                settings._model("custom-opencode", "opencode", "Custom OpenCode", "high", ["low", "high"]),
+                settings._model("custom-claude", "anthropic", "Custom Claude", "high", ["low", "medium", "high", "max"]),
+                settings._model("custom-kimi", "kimi", "Custom Kimi", "max", ["low", "high", "max"]),
+                settings._model("custom-local", "local", "Custom Local", "medium", ["low", "medium", "high"]),
+            ]
+            for route in routes:
+                route["upstream_id"] = "future-provider-model-not-in-cache"
+            routes[-1]["local"] = {"endpoint": "http://127.0.0.1:11434/v1", "protocol": "openai_chat",
+                                   "credential_env": None}
+            document["models"] = routes
+            document["runtime"]["default_model"] = routes[0]["id"]
+            original_home = router.CODEX_HOME
+            try:
+                router.CODEX_HOME = str(home)
+                output = home / "catalog.json"
+                slugs = router.build_catalog(settings.validate(document), str(output))
+            finally:
+                router.CODEX_HOME = original_home
+            self.assertEqual(slugs, [route["id"] for route in routes])
+            built = {item["slug"]: item for item in json.loads(output.read_text(encoding="utf-8"))["models"]}
+            self.assertEqual(set(built), {route["id"] for route in routes})
+            self.assertTrue(all(item["multi_agent_version"] == "v2" for item in built.values()))
+            self.assertEqual(built["custom-opencode"]["use_responses_lite"], False)
+            self.assertEqual(built["custom-opencode"]["tool_mode"], "direct")
+            self.assertEqual(built["custom-local"]["shell_type"], "shell_command")
+
+    def test_catalog_excludes_hidden_and_disabled_routes_but_disables_ineligible_parents(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            document = settings.default_settings()
+            document["models"][0]["subagents"] = False
+            document["models"][1]["visible"] = False
+            document["providers"]["kimi"]["enabled"] = False
+            original_home = router.CODEX_HOME
+            try:
+                router.CODEX_HOME = str(home)
+                output = home / "catalog.json"
+                slugs = router.build_catalog(document, str(output))
+            finally:
+                router.CODEX_HOME = original_home
+            self.assertIn("gpt-6.1-sol", slugs)
+            self.assertNotIn("gpt-6-luna", slugs)
+            self.assertNotIn("k3.1-pro", slugs)
+            built = {item["slug"]: item for item in json.loads(output.read_text(encoding="utf-8"))["models"]}
+            self.assertEqual(built["gpt-6.1-sol"]["multi_agent_version"], "disabled")
+            self.assertTrue(all(item["multi_agent_version"] == "v2" for slug, item in built.items()
+                                if slug != "gpt-6.1-sol"))
+
+    def test_claude_client_headers_follow_linux_and_apple_silicon(self):
+        with patch.object(anthropic_adapter.platform, "system", return_value="Linux"), \
+             patch.object(anthropic_adapter.platform, "machine", return_value="x86_64"):
+            headers = anthropic_adapter._headers("hidden", "session")
+        self.assertEqual(headers["x-stainless-os"], "Linux")
+        self.assertEqual(headers["x-stainless-arch"], "x64")
+        with patch.object(anthropic_adapter.platform, "system", return_value="Darwin"), \
+             patch.object(anthropic_adapter.platform, "machine", return_value="arm64"):
+            headers = anthropic_adapter._headers("hidden", "session")
+        self.assertEqual(headers["x-stainless-os"], "MacOS")
+        self.assertEqual(headers["x-stainless-arch"], "arm64")
+        self.assertNotIn("Windows", headers.values())
 
 
 class _FakeResponses:
@@ -242,6 +315,116 @@ class RouterIntegrationTests(unittest.TestCase):
                 local_server.shutdown()
                 local_server.server_close()
                 local_thread.join()
+
+    def test_openai_child_uses_edited_upstream_id_and_stays_on_codex_lane(self):
+        with tempfile.TemporaryDirectory() as directory:
+            document = settings.default_settings()
+            route = next(model for model in document["models"] if model["provider"] == "openai")
+            route["upstream_id"] = "future-openai-child-id"
+            original_settings, original_usage = router.ACTIVE_SETTINGS, router.USAGE_PATH
+            _FakeHttpsConnection.calls.clear()
+            _FakeHttpsConnection.host = None
+            try:
+                router.ACTIVE_SETTINGS = document
+                router.USAGE_PATH = str(Path(directory) / "usage.sqlite")
+                server, thread = self._router_server()
+                try:
+                    body = json.dumps({"model": route["id"], "stream": True,
+                                       "input": [{"type": "message", "role": "user", "content": "child task"}]}).encode()
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/responses", data=body, method="POST",
+                        headers={"Content-Type": "application/json", "Authorization": "Bearer codex-account-token"},
+                    )
+                    with patch.object(router, "HTTPS_CONNECTION", _FakeHttpsConnection):
+                        with urllib.request.urlopen(request, timeout=10) as response:
+                            self.assertEqual(response.status, 200)
+                            response.read()
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join()
+                call = _FakeHttpsConnection.calls[0]
+                self.assertEqual(call["host"], "chatgpt.com")
+                self.assertEqual(call["headers"]["Authorization"], "Bearer codex-account-token")
+                self.assertEqual(call["body"]["model"], "future-openai-child-id")
+            finally:
+                router.ACTIVE_SETTINGS, router.USAGE_PATH = original_settings, original_usage
+
+    def test_opencode_child_uses_only_opencode_credential_and_edited_upstream_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            document = settings.default_settings()
+            route = next(model for model in document["models"] if model["provider"] == "opencode")
+            route["upstream_id"] = "future-opencode-child-id"
+            original_settings, original_usage = router.ACTIVE_SETTINGS, router.USAGE_PATH
+            _FakeHttpsConnection.calls.clear()
+            try:
+                router.ACTIVE_SETTINGS = document
+                router.USAGE_PATH = str(Path(directory) / "usage.sqlite")
+                server, thread = self._router_server()
+                try:
+                    body = json.dumps({"model": route["id"], "stream": True,
+                                       "input": [{"type": "message", "role": "user", "content": "child task"}]}).encode()
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/responses", data=body, method="POST",
+                        headers={"Content-Type": "application/json", "Authorization": "Bearer parent-codex-token"},
+                    )
+                    with patch.object(router, "HTTPS_CONNECTION", _FakeHttpsConnection), \
+                         patch.object(router.credentials, "get_secret", return_value="opencode-child-secret"):
+                        with urllib.request.urlopen(request, timeout=10) as response:
+                            self.assertEqual(response.status, 200)
+                            response.read()
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join()
+                call = _FakeHttpsConnection.calls[0]
+                self.assertEqual(call["host"], "opencode.ai")
+                self.assertEqual(call["headers"]["Authorization"], "Bearer opencode-child-secret")
+                self.assertEqual(call["body"]["model"], "future-opencode-child-id")
+                self.assertNotIn("parent-codex-token", json.dumps(call))
+            finally:
+                router.ACTIVE_SETTINGS, router.USAGE_PATH = original_settings, original_usage
+
+    def test_anthropic_child_uses_relay_adapter_and_edited_upstream_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            document = settings.default_settings()
+            route = next(model for model in document["models"] if model["provider"] == "anthropic")
+            route["upstream_id"] = "future-claude-child-id"
+            observed: list[dict] = []
+            original_settings, original_usage = router.ACTIVE_SETTINGS, router.USAGE_PATH
+
+            def fake_anthropic(body, start, emit, write_raw, log):
+                observed.append(body)
+                start(200, [("Content-Type", "text/event-stream")])
+                emit("response.completed", {"type": "response.completed", "response": {
+                    "status": "completed", "output": [], "usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6}
+                }})
+                return 200, 1, {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6}
+
+            try:
+                router.ACTIVE_SETTINGS = document
+                router.USAGE_PATH = str(Path(directory) / "usage.sqlite")
+                server, thread = self._router_server()
+                try:
+                    body = json.dumps({"model": route["id"], "stream": True,
+                                       "input": [{"type": "message", "role": "user", "content": "child task"}]}).encode()
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/responses", data=body, method="POST",
+                        headers={"Content-Type": "application/json", "Authorization": "Bearer parent-codex-token"},
+                    )
+                    with patch.object(router.anthropic_adapter, "run", side_effect=fake_anthropic):
+                        with urllib.request.urlopen(request, timeout=10) as response:
+                            self.assertEqual(response.status, 200)
+                            self.assertIn(b"response.completed", response.read())
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join()
+                self.assertEqual(observed[0]["model"], "future-claude-child-id")
+                dashboard = usage_store.dashboard(Path(router.USAGE_PATH), 30)
+                self.assertEqual(dashboard["providers"][0]["provider"], "anthropic")
+            finally:
+                router.ACTIVE_SETTINGS, router.USAGE_PATH = original_settings, original_usage
 
     def test_catalog_keeps_route_slug_when_upstream_id_is_edited(self):
         with tempfile.TemporaryDirectory() as directory:
