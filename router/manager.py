@@ -6,6 +6,7 @@ Windows' current-user environment; OAuth remains in Codex's or OpenCode's own st
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 from pathlib import Path
 import re
@@ -15,17 +16,22 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+import codex_config
 import router
 import settings
 
 HERE = Path(__file__).resolve().parent
 SETTINGS_PATH = Path(os.environ.get("CODEX_ROUTER_SETTINGS") or HERE / "router-settings.json")
 MANAGER_PORT = int(os.environ.get("CODEX_ROUTER_MANAGER_PORT") or 18766)
+DEFAULT_STATIC = HERE.parent / "app" / "dist" if (HERE.parent / "app" / "dist").is_dir() else HERE / "app"
+STATIC_DIR = Path(os.environ.get("CODEX_ROUTER_STATIC") or DEFAULT_STATIC).resolve()
+OPENCODE_AUTH_PATH = Path(os.environ.get("OPENCODE_AUTH_PATH") or Path.home() / ".local" / "share" / "opencode" / "auth.json")
 PROVIDERS = {
     "openai": {"name": "OpenAI", "auth": "Existing Codex / ChatGPT sign-in", "docs": "https://developers.openai.com/codex/auth"},
     "opencode": {"name": "OpenCode Go", "auth": "Personal API key", "docs": "https://opencode.ai/auth"},
@@ -33,6 +39,7 @@ PROVIDERS = {
     "kimi": {"name": "Kimi Code", "auth": "Kimi Code membership API key", "docs": "https://www.kimi.com/code/docs/en/third-party-tools/codex"},
 }
 REDACT = re.compile(r"(?i)(authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|bearer)([\s\"':=]+)[^\s,\"}]+")
+BEARER = re.compile(r"(?i)Bearer\s+[A-Za-z0-9._~+/-]+=*")
 
 
 def _user_env(name: str) -> str | None:
@@ -76,15 +83,16 @@ def provider_state() -> dict[str, dict[str, Any]]:
         item["detail"] = "No local credential found"
         if provider in ("opencode", "kimi"):
             variable = "OPENCODE_API_KEY" if provider == "opencode" else "KIMI_API_KEY"
-            if _user_env(variable):
+            # The development UI is isolated from the machine's live credential stores.
+            if os.environ.get("CODEX_ROUTER_DEV") != "1" and _user_env(variable):
                 item.update(status="credential_found", detail=f"{variable} found; value hidden")
         elif provider == "openai":
-            if (Path.home() / ".codex" / "auth.json").exists():
+            if (Path(router.CODEX_HOME) / "auth.json").exists():
                 item.update(status="credential_found", detail="Codex credential store found; account details hidden")
             else:
                 item.update(status="unknown", detail="Check Codex's profile menu; keyring-only sign-in cannot be detected here")
         else:
-            auth_path = Path.home() / ".local" / "share" / "opencode" / "auth.json"
+            auth_path = OPENCODE_AUTH_PATH
             try:
                 with auth_path.open(encoding="utf-8") as handle:
                     document = json.load(handle)
@@ -148,7 +156,7 @@ def redacted_log() -> list[str]:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-120:]
     except OSError:
         return []
-    return [REDACT.sub(lambda match: match.group(1) + match.group(2) + "[hidden]", line) for line in lines]
+    return [REDACT.sub(lambda match: match.group(1) + match.group(2) + "[hidden]", BEARER.sub("Bearer [hidden]", line)) for line in lines]
 
 
 def launch_login(provider: str) -> dict[str, Any]:
@@ -200,14 +208,37 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("Expected a JSON object")
         return value
 
+    def serve_static(self):
+        relative = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path).lstrip("/") or "index.html"
+        try:
+            source = (STATIC_DIR / relative).resolve()
+            source.relative_to(STATIC_DIR)
+        except ValueError:
+            self.reply(403, {"error": "Invalid static path"})
+            return
+        if not source.is_file():
+            self.reply(404, {"error": "Interface not built. Run npm run build in app, or use npm run dev."})
+            return
+        payload = source.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", mimetypes.guess_type(source.name)[0] or "application/octet-stream")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.end_headers()
+        self.wfile.write(payload)
+
     def do_GET(self):
         try:
             if self.path == "/api/state":
                 self.reply(200, state())
             elif self.path == "/api/diagnostics":
                 self.reply(200, {"router": router_health(), "log": redacted_log()})
-            else:
+            elif self.path.startswith("/api/"):
                 self.reply(404, {"error": "Not found"})
+            else:
+                self.serve_static()
         except Exception as exc:
             self.reply(500, {"error": str(exc)})
 
@@ -233,16 +264,27 @@ class Handler(BaseHTTPRequestHandler):
                 clean = settings.save(SETTINGS_PATH, clean)
                 models = router.build_catalog(clean)
                 development = os.environ.get("CODEX_ROUTER_DEV") == "1"
-                reloaded, message = False, "Catalog written. Start the updated router when convenient; Codex was not restarted."
+                reloaded, default_updated = False, False
+                message = "Catalog written. Start the updated router when convenient; Codex was not restarted."
                 if not development:
+                    config_path = Path(router.CODEX_HOME) / "config.toml"
+                    if config_path.is_file():
+                        selected = next(model for model in clean["models"] if model["id"] == clean["runtime"]["default_model"])
+                        try:
+                            codex_config.set_default_model(config_path, selected["id"], selected["reasoning"]["default"])
+                            default_updated = True
+                        except (OSError, ValueError) as exc:
+                            message = f"Catalog saved, but the Codex default was not updated: {exc}"
                     try:
                         request = urllib.request.Request(f"http://127.0.0.1:{router.PORT}/__router_reload", data=b"{}", method="POST", headers={"Content-Type": "application/json"})
                         with urllib.request.urlopen(request, timeout=4) as response:
                             result = json.load(response)
-                        reloaded, message = bool(result.get("ok")), "Running router reloaded without restarting Codex."
+                        reloaded = bool(result.get("ok"))
+                        if reloaded and default_updated:
+                            message = "Router and Codex default updated without restarting Codex. Picker changes may appear in new chats."
                     except (OSError, ValueError, urllib.error.URLError):
                         pass
-                self.reply(200, {"ok": True, "models": models, "router_reloaded": reloaded, "message": message})
+                self.reply(200, {"ok": True, "models": models, "router_reloaded": reloaded, "codex_default_updated": default_updated, "message": message})
             elif self.path == "/api/credential":
                 provider = body.get("provider")
                 expected = {"opencode": "OPENCODE_API_KEY", "kimi": "KIMI_API_KEY"}.get(str(provider))
@@ -269,7 +311,10 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     server = ThreadingHTTPServer(("127.0.0.1", MANAGER_PORT), Handler)
-    print(f"Router manager listening on http://127.0.0.1:{MANAGER_PORT}", flush=True)
+    address = f"http://127.0.0.1:{MANAGER_PORT}"
+    print(f"Router manager listening on {address}", flush=True)
+    if "--open" in sys.argv:
+        webbrowser.open(address)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

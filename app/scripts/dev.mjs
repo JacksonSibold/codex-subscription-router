@@ -19,7 +19,7 @@ if (!existsSync(cache)) {
 const python = process.env.PYTHON || 'python';
 const manager = spawn(python, [resolve(root, 'router/manager.py')], {
   stdio: ['ignore', 'pipe', 'pipe'],
-  env: { ...process.env, CODEX_HOME: devHome, CODEX_ROUTER_DEV: '1', CODEX_ROUTER_SETTINGS: resolve(devHome, 'router-settings.json') },
+  env: { ...process.env, CODEX_HOME: devHome, CODEX_ROUTER_DEV: '1', CODEX_ROUTER_SETTINGS: resolve(devHome, 'router-settings.json'), OPENCODE_AUTH_PATH: resolve(devHome, 'opencode-auth.json') },
 });
 manager.stdout.on('data', data => process.stdout.write(`[manager] ${data}`));
 manager.stderr.on('data', data => process.stderr.write(`[manager] ${data}`));
