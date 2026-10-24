@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Credentials and local authorization state
+.env
+.env.*
+!.env.example
+auth.json
+.credentials.json
+*secret*
+*token*
+
+# Runtime state and logs
+*.log
+*.jsonl
+*.sqlite
+*.sqlite-*
+reasoning-origins.json
+router.log
+router.log.old
+
+# Machine-specific Codex state
+models_cache.json
+mixed-models.json
+.codex-global-state.json
+
+# Backups and temporary files
+*.bak
+*.backup
+*.before-*
+*.tmp
+*.tmp-*
+~$*
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

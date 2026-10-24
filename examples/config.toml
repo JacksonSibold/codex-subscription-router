@@ -1,0 +1,16 @@
+# Example only: merge these settings into ~/.codex/config.toml.
+# Keep your existing Codex plugins, projects, and other settings.
+model = "deepseek-v4.1-flash"
+model_provider = "mixed"
+model_catalog_json = "~/.codex/mixed-models.json"
+model_reasoning_effort = "medium"
+
+[desktop]
+enabled-reasoning-efforts = ["minimal", "low", "medium", "high", "xhigh", "max"]
+
+[model_providers.mixed]
+name = "OpenAI + OpenCode Go + Claude Pro + Kimi"
+base_url = "http://127.0.0.1:18765"
+wire_api = "responses"
+requires_openai_auth = true
+supports_websockets = false
