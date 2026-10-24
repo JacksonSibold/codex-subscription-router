@@ -210,9 +210,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def serve_static(self):
         relative = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path).lstrip("/") or "index.html"
+        static_root = STATIC_DIR.resolve()
         try:
-            source = (STATIC_DIR / relative).resolve()
-            source.relative_to(STATIC_DIR)
+            source = (static_root / relative).resolve()
+            source.relative_to(static_root)
         except ValueError:
             self.reply(403, {"error": "Invalid static path"})
             return
