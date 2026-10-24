@@ -28,6 +28,7 @@ FORBIDDEN = (
     "auth.json", "credentials.json", "router-settings.json", "mixed-models.json",
     "router.log", "reasoning-origins.json", ".sqlite", ".dev-codex", "__pycache__",
 )
+LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def _archive_details(archive: Path) -> tuple[str, str, str]:
@@ -86,7 +87,7 @@ def _wait_json(url: str, timeout: float = 20.0) -> dict:
     last: Exception | None = None
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=2) as response:
+            with LOOPBACK_OPENER.open(url, timeout=2) as response:
                 value = json.load(response)
             if isinstance(value, dict):
                 return value
@@ -191,7 +192,7 @@ def _verify_installer(package: Path, workspace: Path, version: str) -> None:
         state = _wait_json(f"http://127.0.0.1:{port}/api/state")
         if state.get("version") != version or len(state.get("settings", {}).get("models", [])) != 11:
             raise RuntimeError("Installed manager did not expose the complete 1.0 state")
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5) as response:
+        with LOOPBACK_OPENER.open(f"http://127.0.0.1:{port}/", timeout=5) as response:
             if b'<div id="root">' not in response.read():
                 raise RuntimeError("Installed manager did not serve the production interface")
     finally:
@@ -230,9 +231,18 @@ def verify(archive: Path) -> None:
         manager_env["CODEX_ROUTER_MANAGER_PORT"] = str(manager_port)
         manager = _start(package / "router" / "manager.py", manager_env)
         router = None
+        manager_stopped = False
         try:
             base = f"http://127.0.0.1:{manager_port}"
-            state = _wait_json(base + "/api/state")
+            try:
+                state = _wait_json(base + "/api/state")
+            except Exception as exc:
+                logs = _stop(manager)
+                manager_stopped = True
+                raise RuntimeError(
+                    f"Packaged manager did not answer on {base} "
+                    f"(exit {manager.returncode}):\n{logs}"
+                ) from exc
             if state.get("version") != version:
                 raise RuntimeError(f"Manager reports version {state.get('version')!r}, expected {version}")
             if len(state.get("settings", {}).get("models", [])) != 11:
@@ -242,7 +252,7 @@ def verify(archive: Path) -> None:
                 raise RuntimeError("Packaged add-model catalog is incomplete")
             if not state.get("usage", {}).get("accounts"):
                 raise RuntimeError("Packaged usage inventory is empty")
-            with urllib.request.urlopen(base + "/", timeout=5) as response:
+            with LOOPBACK_OPENER.open(base + "/", timeout=5) as response:
                 if b'<div id="root">' not in response.read():
                     raise RuntimeError("Packaged interface index was not served")
             payload = json.dumps({"settings": state["settings"]}).encode()
@@ -250,7 +260,7 @@ def verify(archive: Path) -> None:
                 base + "/api/preview", data=payload, method="POST",
                 headers={"Content-Type": "application/json", "X-Router-Manager": "1"},
             )
-            with urllib.request.urlopen(preview_request, timeout=10) as response:
+            with LOOPBACK_OPENER.open(preview_request, timeout=10) as response:
                 preview = json.load(response)
             if len(preview.get("models", [])) != 11:
                 raise RuntimeError("Packaged catalog preview did not include all default routes")
@@ -267,7 +277,7 @@ def verify(archive: Path) -> None:
         finally:
             if router is not None:
                 _stop(router)
-            logs = _stop(manager)
+            logs = "" if manager_stopped else _stop(manager)
             if manager.returncode not in (0, -15, 143, 1, 3221225786):
                 raise RuntimeError(f"Packaged manager exited unexpectedly ({manager.returncode}):\n{logs}")
         _verify_installer(package, workspace, version)
