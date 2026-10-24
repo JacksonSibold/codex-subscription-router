@@ -25,33 +25,31 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import anthropic_adapter
 import namespace_tools
+import settings as router_settings
 
-HOST, PORT = "127.0.0.1", 18765
 HERE = os.path.dirname(os.path.abspath(__file__))
-CODEX_HOME = os.path.dirname(HERE)
+CODEX_HOME = os.environ.get("CODEX_HOME") or os.path.dirname(HERE)
+SETTINGS_PATH = os.environ.get("CODEX_ROUTER_SETTINGS") or os.path.join(HERE, "router-settings.json")
+ACTIVE_SETTINGS = router_settings.load(SETTINGS_PATH)
+HOST = "127.0.0.1"
+PORT = int(os.environ.get("CODEX_ROUTER_PORT") or ACTIVE_SETTINGS["runtime"]["port"])
 LOG_PATH = os.path.join(HERE, "router.log")
 ORIGINS_PATH = os.path.join(HERE, "reasoning-origins.json")
 
-# OpenAI models in the picker (slug, display name). They win over OpenCode Go's same-named ones.
-OPENAI_PICKS = [("gpt-6.1-sol", "GPT-6.1 Sol"), ("gpt-6-luna", "GPT-6 Luna")]
-OPENAI_MODELS = {slug for slug, _ in OPENAI_PICKS}
-# Claude Pro models use the OAuth account already connected in OpenCode.
-ANTHROPIC_PICKS = [("claude-sonnet-5-5", "Claude Sonnet 5.5"), ("claude-opus-5-5", "Claude Opus 5.5")]
-ANTHROPIC_MODELS = {slug for slug, _ in ANTHROPIC_PICKS}
-# Kimi membership uses its native Responses API and its own subscription API key.
-KIMI_PICKS = [("k3.1-pro", "Kimi K3.1 Pro")]
-KIMI_MODELS = {slug for slug, _ in KIMI_PICKS}
-CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"]
-KIMI_EFFORTS = ["low", "high", "max"]
-# Live OpenCode capability metadata: each model exposes only the efforts it actually supports.
-GO_REASONING = {
-    "grok-4.7": ("medium", ["low", "medium", "high", "xhigh"]),
-    "muse-spark-1.3-contributor": ("medium", ["minimal", "low", "medium", "high", "xhigh"]),
-    "deepseek-v4.1-flash": ("high", ["low", "high", "max"]),
-    "beam-free": ("medium", ["low", "medium", "high", "xhigh", "max"]),
-    "glm-5.3-flash": ("high", ["low", "high", "max"]),
-    "kimi-k3.1-pro": ("max", ["low", "high", "max"]),
-}
+
+def reload_settings(document=None):
+    """Swap validated preferences atomically; in-flight handler threads keep their snapshot."""
+    global ACTIVE_SETTINGS
+    ACTIVE_SETTINGS = document or router_settings.load(SETTINGS_PATH)
+    return ACTIVE_SETTINGS
+
+
+def enabled_models(provider=None):
+    return {model["id"]: model for model in ACTIVE_SETTINGS["models"]
+            if ACTIVE_SETTINGS["providers"][model["provider"]]["enabled"]
+            and (provider is None or model["provider"] == provider)}
+
+
 # Third-party endpoints speak the standard Responses API, not OpenAI's internal variants.
 OPENCODE_CATALOG_OVERRIDES = {"use_responses_lite": False, "tool_mode": "direct", "apply_patch_tool_type": None,
                               "supports_search_tool": False, "supports_image_detail_original": False,
@@ -94,67 +92,81 @@ def reasoning_levels(efforts):
     return [{"effort": effort, "description": descriptions[effort]} for effort in efforts]
 
 
-def opencode_models():
-    with open(os.path.join(CODEX_HOME, "opencode-go-models.json"), encoding="utf-8") as f:
-        return {m["slug"] for m in json.load(f)["models"]} - OPENAI_MODELS - ANTHROPIC_MODELS - KIMI_MODELS
+def opencode_models(document=None):
+    document = document or ACTIVE_SETTINGS
+    return {m["id"] for m in document["models"]
+            if m["provider"] == "opencode" and document["providers"]["opencode"]["enabled"]}
 
 
-def build_catalog():
-    """Build one picker catalog with per-model providers and accurate thinking controls."""
-    with open(os.path.join(CODEX_HOME, "models_cache.json"), encoding="utf-8") as f:
-        cache = {m["slug"]: m for m in json.load(f)["models"]}
-    with open(os.path.join(CODEX_HOME, "opencode-go-models.json"), encoding="utf-8") as f:
-        go = json.load(f)["models"]
-    picks = [{**cache[slug], "display_name": f"{name} — OpenAI"} for slug, name in OPENAI_PICKS if slug in cache]
-    for m in go:
-        if m["slug"] in OPENAI_MODELS:
+def _read_json(path, fallback):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return fallback
+
+
+def build_catalog(document=None, output_path=None):
+    """Build the ordered picker without changing Codex's configuration or restarting it."""
+    document = document or ACTIVE_SETTINGS
+    cache = {m["slug"]: m for m in _read_json(os.path.join(CODEX_HOME, "models_cache.json"), {"models": []})["models"]}
+    go = {m["slug"]: m for m in _read_json(os.path.join(CODEX_HOME, "opencode-go-models.json"), {"models": []})["models"]}
+    template = copy.deepcopy(go.get("deepseek-v4.1-flash") or next(iter(go.values()), None) or {
+        "shell_type": "unified_exec", "apply_patch_tool_type": "freeform",
+        "input_modalities": ["text", "image"], "supported_in_api": True,
+    })
+    picks = []
+    descriptions = {
+        "openai": "OpenAI model through your existing Codex sign-in",
+        "opencode": "OpenCode Go subscription model",
+        "anthropic": "Claude Pro subscription via OpenCode OAuth",
+        "kimi": "Kimi Code membership through the native Kimi Responses API",
+    }
+    for preference in document["models"]:
+        provider = preference["provider"]
+        if not preference["visible"] or not document["providers"][provider]["enabled"]:
             continue
-        item = {**m, **OPENCODE_CATALOG_OVERRIDES}
-        default, efforts = GO_REASONING.get(m["slug"], (m.get("default_reasoning_level", "medium"), []))
-        item["default_reasoning_level"] = default
-        item["supported_reasoning_levels"] = reasoning_levels(efforts)
-        picks.append(item)
-    template = next((m for m in picks if m["slug"] == "deepseek-v4.1-flash"), picks[-1])
-    for slug, name in ANTHROPIC_PICKS:
-        item = copy.deepcopy(template)
+        slug = preference["id"]
+        if provider == "openai":
+            if slug not in cache:
+                continue
+            item = copy.deepcopy(cache[slug])
+        elif provider == "opencode":
+            if slug not in go:
+                continue
+            item = {**copy.deepcopy(go[slug]), **OPENCODE_CATALOG_OVERRIDES}
+        else:
+            item = copy.deepcopy(template)
+            item.update({"supported_in_api": True, "input_modalities": ["text", "image"],
+                         "supports_reasoning_effort_updates": True, "supports_search_tool": False})
+            if provider == "anthropic":
+                item.update({"context_window": 200000, "max_context_window": 1000000})
+            else:
+                item.update({"shell_type": "shell_command", "apply_patch_tool_type": "freeform",
+                             "context_window": 1048576, "max_context_window": 1048576,
+                             "truncation_policy": {"mode": "bytes", "limit": 10000},
+                             "supports_reasoning_summaries": True, "default_reasoning_summary": "none",
+                             "support_verbosity": False})
+        reasoning = preference["reasoning"]
+        tools = preference["tools"]
         item.update({
-            "slug": slug,
-            "display_name": f"{name} — Claude Pro",
-            "description": "Claude Pro subscription via OpenCode OAuth",
-            "context_window": 200000,
-            "max_context_window": 1000000,
-            "input_modalities": ["text", "image"],
-            "default_reasoning_level": "medium",
-            "supported_reasoning_levels": reasoning_levels(CLAUDE_EFFORTS),
-            "supports_reasoning_effort_updates": True,
+            "slug": slug, "display_name": preference["display_name"], "description": descriptions[provider],
+            "default_reasoning_level": reasoning["default"],
+            "supported_reasoning_levels": reasoning_levels(reasoning["supported"]),
+            "supports_reasoning_effort_updates": bool(reasoning["supported"]),
+            "supports_search_tool": tools["web_search"],
+            "node_repl_disabled": not tools["computer_use"],
+            "multi_agent_version": "v2" if preference["subagents"] else None,
         })
+        if not tools["shell"]:
+            item["shell_type"] = None
+            item["apply_patch_tool_type"] = None
         picks.append(item)
-    for slug, name in KIMI_PICKS:
-        item = copy.deepcopy(template)
-        item.update({
-            "slug": slug,
-            "display_name": f"{name} — Kimi Membership",
-            "description": "Kimi Code membership through the native Kimi Responses API",
-            "shell_type": "shell_command",
-            "apply_patch_tool_type": "freeform",
-            "context_window": 1048576,
-            "max_context_window": 1048576,
-            "truncation_policy": {"mode": "bytes", "limit": 10000},
-            "input_modalities": ["text", "image"],
-            "default_reasoning_level": "max",
-            "supported_reasoning_levels": reasoning_levels(KIMI_EFFORTS),
-            "supports_reasoning_effort_updates": True,
-            "supports_reasoning_summaries": True,
-            "default_reasoning_summary": "none",
-            "support_verbosity": False,
-            "supports_search_tool": False,
-        })
-        picks.append(item)
-    for i, m in enumerate(picks, 1):
-        m["priority"], m["visibility"] = i, "list"
-    path = os.path.join(CODEX_HOME, "mixed-models.json")
-    with open(path + ".tmp", "w", encoding="utf-8") as f:
-        json.dump({"models": picks}, f, ensure_ascii=False, indent=2)
+    for index, model in enumerate(picks, 1):
+        model["priority"], model["visibility"] = index, "list"
+    path = output_path or os.path.join(CODEX_HOME, "mixed-models.json")
+    with open(path + ".tmp", "w", encoding="utf-8") as handle:
+        json.dump({"models": picks}, handle, ensure_ascii=False, indent=2)
     os.replace(path + ".tmp", path)
     return [m["slug"] for m in picks]
 
@@ -248,6 +260,40 @@ def tidy_for_opencode(body):
     return changed
 
 
+def apply_tool_policy(body, preference):
+    """Enforce the selected model's tool policy before any provider sees the request."""
+    tools = preference["tools"]
+    changed = False
+
+    def allowed(tool):
+        if not isinstance(tool, dict):
+            return True
+        kind = tool.get("type")
+        name = str(tool.get("name") or "")
+        if kind == "namespace":
+            computer = name.startswith(namespace_tools.ALLOWED_PREFIXES)
+            return tools["computer_use"] if computer else tools["connected_apps"]
+        if kind == "web_search" or (isinstance(kind, str) and kind.startswith("web_search")):
+            return tools["web_search"]
+        if kind == "local_shell" or name in {"shell", "exec_command", "unified_exec", "write_stdin", "apply_patch"}:
+            return tools["shell"]
+        return True
+
+    if isinstance(body.get("tools"), list):
+        kept = [tool for tool in body["tools"] if allowed(tool)]
+        changed = len(kept) != len(body["tools"])
+        body["tools"] = kept
+    for item in body.get("input") or []:
+        if isinstance(item, dict) and item.get("type") == "additional_tools" and isinstance(item.get("tools"), list):
+            kept = [tool for tool in item["tools"] if allowed(tool)]
+            changed |= len(kept) != len(item["tools"])
+            item["tools"] = kept
+    if not body.get("tools"):
+        body.pop("tools", None)
+        body.pop("tool_choice", None)
+    return changed
+
+
 class SseReasoningScanner:
     """Collects fingerprints of reasoning items in a streamed Responses API reply."""
 
@@ -294,19 +340,33 @@ class Handler(BaseHTTPRequestHandler):
                 self.rfile.readline()
         return self.rfile.read(int(self.headers.get("Content-Length") or 0))
 
+    def respond_json(self, status, value):
+        msg = json.dumps(value).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(msg)))
+        self.end_headers()
+        self.wfile.write(msg)
+
     def do_GET(self):
         if self.path == "/__router_health":
-            msg = json.dumps({"namespace_bridge": namespace_tools.VERSION, "pid": os.getpid()}).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(msg)))
-            self.end_headers()
-            self.wfile.write(msg)
+            self.respond_json(200, {"namespace_bridge": namespace_tools.VERSION, "pid": os.getpid(),
+                                    "models": len(enabled_models()), "settings_version": ACTIVE_SETTINGS["version"]})
             return
         self.route(b"")
 
     def do_POST(self):
-        self.route(self.read_body())
+        raw = self.read_body()
+        if self.path == "/__router_reload":
+            try:
+                document = reload_settings()
+                models = build_catalog(document)
+                self.respond_json(200, {"ok": True, "models": models})
+            except Exception as exc:
+                log(f"ERROR settings reload: {exc!r}")
+                self.respond_json(400, {"ok": False, "error": str(exc)})
+            return
+        self.route(raw)
 
     def do_DELETE(self):
         self.route(self.read_body())
@@ -352,22 +412,24 @@ class Handler(BaseHTTPRequestHandler):
                 model = body.get("model") if isinstance(body, dict) else None
             except ValueError:
                 body = None
-        if model in ANTHROPIC_MODELS:
-            lane = "anthropic"
-        elif model in KIMI_MODELS:
-            lane = "kimi"
-        elif model in opencode_models():
-            lane = "opencode"
+        snapshot = ACTIVE_SETTINGS
+        preference = next((m for m in snapshot["models"] if m["id"] == model), None)
+        if preference and not snapshot["providers"][preference["provider"]]["enabled"]:
+            self.respond_json(400, {"error": {"message": f"Provider is disabled for model: {model}"}})
+            return
+        if preference:
+            lane = preference["provider"]
         if isinstance(body, dict):
             dropped = drop_foreign_reasoning(body, lane)
+            policy_changed = apply_tool_policy(body, preference) if preference else False
             if lane == "anthropic":
                 return self.route_anthropic(body, model, started, dropped)
             flattened = False
             if lane in ("opencode", "kimi"):
-                # Flatten MCP namespaces (Computer Use) BEFORE tidy drops all namespace tools.
+                # Flatten Computer Use before removing unsupported connected-app namespaces.
                 ns_map, flattened = namespace_tools.flatten_request(body)
             tidied = tidy_for_opencode(body) if lane in ("opencode", "kimi") else False
-            if dropped or tidied or flattened:
+            if dropped or tidied or flattened or policy_changed:
                 raw = json.dumps(body).encode()
 
         host, prefix = LANES[lane]
@@ -443,7 +505,7 @@ def main():
         sys.exit(0)  # already running
     if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > 2_000_000:
         os.replace(LOG_PATH, LOG_PATH + ".old")
-    log(f"namespace bridge v{namespace_tools.VERSION} ok; listening on {HOST}:{PORT}; opencode models: {sorted(opencode_models())}; anthropic models: {sorted(ANTHROPIC_MODELS)}")
+    log(f"namespace bridge v{namespace_tools.VERSION} ok; listening on {HOST}:{PORT}; enabled models: {sorted(enabled_models())}")
     try:
         log(f"rebuilt mixed-models.json: {build_catalog()}")
     except Exception as e:  # keep serving with the existing catalog

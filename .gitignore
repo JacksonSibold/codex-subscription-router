@@ -10,8 +10,13 @@ venv/
 !.env.example
 auth.json
 .credentials.json
-*secret*
-*token*
+*credentials*.json
+*.pem
+*.key
+
+# Local preferences and their backups (share examples instead)
+router-settings.json
+router-settings.json.backup-*
 
 # Runtime state and logs
 *.log

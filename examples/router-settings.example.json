@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "runtime": {
+    "host": "127.0.0.1",
+    "port": 18765,
+    "default_model": "claude-opus-5-5"
+  },
+  "providers": {
+    "openai": { "enabled": true, "auth_method": "codex", "credential_env": null },
+    "opencode": { "enabled": true, "auth_method": "api_key", "credential_env": "OPENCODE_API_KEY" },
+    "anthropic": { "enabled": true, "auth_method": "opencode_oauth", "credential_env": null },
+    "kimi": { "enabled": true, "auth_method": "api_key", "credential_env": "KIMI_API_KEY" }
+  },
+  "models": [
+    {
+      "id": "claude-opus-5-5",
+      "provider": "anthropic",
+      "display_name": "Claude Opus 5.5 — Claude Pro",
+      "visible": true,
+      "reasoning": { "default": "high", "supported": ["low", "medium", "high", "xhigh", "max"] },
+      "tools": { "shell": true, "computer_use": true, "web_search": false, "connected_apps": false },
+      "subagents": true
+    },
+    {
+      "id": "k3.1-pro",
+      "provider": "kimi",
+      "display_name": "Kimi K3.1 Pro — Kimi Membership",
+      "visible": true,
+      "reasoning": { "default": "max", "supported": ["low", "high", "max"] },
+      "tools": { "shell": true, "computer_use": true, "web_search": false, "connected_apps": false },
+      "subagents": true
+    }
+  ]
+}
