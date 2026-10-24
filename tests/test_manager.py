@@ -16,6 +16,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "router"))
 import manager
+import usage_store
 
 
 class ManagerTests(unittest.TestCase):
@@ -61,7 +62,7 @@ class ManagerTests(unittest.TestCase):
             opencode_auth.write_text('{"anthropic": {"access": "hidden"}}', encoding="utf-8")
             with patch.object(manager.router, "CODEX_HOME", str(home)), \
                  patch.object(manager, "OPENCODE_AUTH_PATH", opencode_auth), \
-                 patch.dict(os.environ, {"CODEX_ROUTER_DEV": "1"}), \
+                 patch.dict(os.environ, {"CODEX_ROUTER_DEV": "1", "OPENCODE_AUTH_PATH": str(opencode_auth)}), \
                  patch.object(manager, "_user_env") as user_env:
                 providers = manager.provider_state()
             user_env.assert_not_called()
@@ -69,6 +70,75 @@ class ManagerTests(unittest.TestCase):
             self.assertEqual(providers["anthropic"]["status"], "credential_found")
             self.assertEqual(providers["opencode"]["status"], "not_configured")
             self.assertEqual(providers["kimi"]["status"], "not_configured")
+
+    def test_usage_api_aggregates_all_provider_accounts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            database = home / "usage.sqlite"
+            usage_store.record(database, "anthropic", "Claude Relay OAuth", "claude-opus-5-5", 200,
+                               {"input_tokens": 10, "output_tokens": 5})
+            usage_store.record(database, "local", "Local · 127.0.0.1:11434", "local-llama", 200,
+                               {"input_tokens": 7, "output_tokens": 3})
+            with patch.dict(os.environ, {"CODEX_ROUTER_USAGE_DB": str(database)}):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), manager.Handler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/api/usage?days=30") as response:
+                        dashboard = json.load(response)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join()
+            self.assertEqual(dashboard["totals"]["requests"], 2)
+            self.assertEqual(dashboard["totals"]["total_tokens"], 25)
+            self.assertEqual({row["provider"] for row in dashboard["providers"]}, {"anthropic", "local"})
+            self.assertNotIn("test-access", json.dumps(dashboard))
+
+    def test_subscription_usage_endpoint_is_sanitized_and_covers_all_lanes(self):
+        snapshot = {
+            "checked_at": "2030-01-01T00:00:00Z",
+            "providers": [
+                {"provider": provider, "account": "hidden account", "status": "unavailable",
+                 "plan": None, "windows": [], "detail": "No allowance API."}
+                for provider in manager.PROVIDERS
+            ],
+        }
+        with patch.object(manager.subscription_usage, "collect", return_value=snapshot) as collect:
+            server = ThreadingHTTPServer(("127.0.0.1", 0), manager.Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{server.server_port}/api/subscription-usage"
+                ) as response:
+                    result = json.load(response)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+        collect.assert_called_once()
+        self.assertEqual(len(result["providers"]), 5)
+        self.assertNotIn("access_token", json.dumps(result).lower())
+        self.assertNotIn("refresh", json.dumps(result).lower())
+
+    def test_add_model_catalog_always_lists_openai_and_claude(self):
+        with tempfile.TemporaryDirectory() as directory,              patch.object(manager.router, "CODEX_HOME", str(Path(directory))):
+            models = manager.available_models()
+        providers = {model["provider"] for model in models}
+        self.assertIn("openai", providers)
+        self.assertIn("anthropic", providers)
+        self.assertIn("kimi", providers)
+        self.assertEqual(len({(model["provider"], model["id"]) for model in models}), len(models))
+
+    def test_relay_oauth_status_takes_precedence_over_opencode_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(manager.anthropic_oauth, "credential_status", return_value={
+                "status": "credential_found", "expired": False, "expires": 9999999999999
+            }), patch.object(manager, "_user_env", return_value=None):
+                providers = manager.provider_state()
+            self.assertEqual(providers["anthropic"]["status"], "credential_found")
+            self.assertIn("Relay OAuth", providers["anthropic"]["detail"])
 
     def _post_apply(self, home: Path, document: dict) -> dict:
         with patch.object(manager, "SETTINGS_PATH", home / "router-settings.json"), \

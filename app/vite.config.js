@@ -8,7 +8,7 @@ export default defineConfig({
     port: 7100,
     strictPort: false,
     proxy: {
-      '/api': 'http://127.0.0.1:18766',
+      '/api': `http://127.0.0.1:${process.env.CODEX_ROUTER_MANAGER_PORT || '18766'}`,
     },
   },
 });

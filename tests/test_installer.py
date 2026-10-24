@@ -26,6 +26,7 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(parsed["model_reasoning_effort"], "medium")
             self.assertEqual(parsed["model_providers"]["mixed"]["base_url"], "http://127.0.0.1:18765")
             self.assertEqual(parsed["model_catalog_json"], str(Path(directory) / "mixed-models.json"))
+            self.assertTrue(parsed["agents"]["enabled"])
             self.assertTrue(list(Path(directory).glob("config.toml.backup-*")))
 
     def test_default_model_uses_its_own_reasoning_default(self):

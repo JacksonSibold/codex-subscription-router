@@ -1,7 +1,7 @@
 """Loopback-only management API for the subscription router GUI.
 
-No endpoint returns a credential. API keys are accepted write-only and stored in
-Windows' current-user environment; OAuth remains in Codex's or OpenCode's own store.
+No endpoint returns a credential. API keys and Relay's Claude OAuth token set use
+the current-user credential store; Codex's ChatGPT sign-in remains in Codex.
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -22,9 +23,14 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+import anthropic_oauth
 import codex_config
+import credentials
+import local_adapter
 import router
 import settings
+import subscription_usage
+import usage_store
 
 HERE = Path(__file__).resolve().parent
 SETTINGS_PATH = Path(os.environ.get("CODEX_ROUTER_SETTINGS") or HERE / "router-settings.json")
@@ -35,35 +41,24 @@ OPENCODE_AUTH_PATH = Path(os.environ.get("OPENCODE_AUTH_PATH") or Path.home() / 
 PROVIDERS = {
     "openai": {"name": "OpenAI", "auth": "Existing Codex / ChatGPT sign-in", "docs": "https://developers.openai.com/codex/auth"},
     "opencode": {"name": "OpenCode Go", "auth": "Personal API key", "docs": "https://opencode.ai/auth"},
-    "anthropic": {"name": "Claude Pro", "auth": "OpenCode Anthropic OAuth", "docs": "https://opencode.ai/docs/providers/#anthropic"},
+    "anthropic": {"name": "Claude", "auth": "Relay-owned OAuth for eligible Claude plans", "docs": "https://docs.anthropic.com/en/docs/claude-code/overview"},
     "kimi": {"name": "Kimi Code", "auth": "Kimi Code membership API key", "docs": "https://www.kimi.com/code/docs/en/third-party-tools/codex"},
+    "local": {"name": "Local models", "auth": "Loopback OpenAI-compatible endpoint", "docs": "https://platform.openai.com/docs/api-reference/chat"},
 }
+OAUTH_FLOWS: dict[str, anthropic_oauth.PendingFlow] = {}
+OAUTH_LOCK = threading.Lock()
 REDACT = re.compile(r"(?i)(authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|bearer)([\s\"':=]+)[^\s,\"}]+")
 BEARER = re.compile(r"(?i)Bearer\s+[A-Za-z0-9._~+/-]+=*")
 
 
 def _user_env(name: str) -> str | None:
-    value = os.environ.get(name)
-    if value:
-        return value
-    if os.name != "nt":
-        return None
-    import winreg
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
-            value, _ = winreg.QueryValueEx(key, name)
-            return value if isinstance(value, str) and value else None
-    except OSError:
-        return None
+    return credentials.get_secret(name)
 
 
 def _set_user_env(name: str, value: str) -> None:
+    credentials.set_secret(name, value)
     if os.name != "nt":
-        raise RuntimeError("The graphical credential store currently supports Windows only")
-    import winreg
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_SET_VALUE) as key:
-        winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
-    os.environ[name] = value
+        return
     # Ask Explorer and other well-behaved apps to refresh their environment. Existing
     # processes are not killed or restarted; the router also reads this store per request.
     try:
@@ -77,6 +72,7 @@ def _set_user_env(name: str, value: str) -> None:
 
 def provider_state() -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
+    development = os.environ.get("CODEX_ROUTER_DEV") == "1"
     for provider, metadata in PROVIDERS.items():
         item = dict(metadata)
         item["status"] = "not_configured"
@@ -84,14 +80,37 @@ def provider_state() -> dict[str, dict[str, Any]]:
         if provider in ("opencode", "kimi"):
             variable = "OPENCODE_API_KEY" if provider == "opencode" else "KIMI_API_KEY"
             # The development UI is isolated from the machine's live credential stores.
-            if os.environ.get("CODEX_ROUTER_DEV") != "1" and _user_env(variable):
+            if not development and _user_env(variable):
                 item.update(status="credential_found", detail=f"{variable} found; value hidden")
         elif provider == "openai":
             if (Path(router.CODEX_HOME) / "auth.json").exists():
                 item.update(status="credential_found", detail="Codex credential store found; account details hidden")
             else:
                 item.update(status="unknown", detail="Check Codex's profile menu; keyring-only sign-in cannot be detected here")
-        else:
+        elif provider == "local":
+            try:
+                document = settings.load(SETTINGS_PATH)
+                endpoints = sorted({model["local"]["endpoint"] for model in document["models"] if model["provider"] == "local"})
+            except (OSError, ValueError, KeyError):
+                endpoints = []
+            if endpoints:
+                item.update(status="ready", detail=f"{len(endpoints)} loopback endpoint(s) configured; no cloud credential required")
+            else:
+                item.update(status="unknown", detail="Add a local endpoint such as Ollama or LM Studio")
+        elif provider == "anthropic":
+            relay_status = None
+            if not development or os.environ.get("CODEX_ROUTER_CREDENTIALS"):
+                relay_status = anthropic_oauth.credential_status()
+            if relay_status:
+                suffix = " (refresh required)" if relay_status.get("expired") else ""
+                item.update(status="credential_found", detail="Claude Relay OAuth found; tokens hidden" + suffix)
+                result[provider] = item
+                continue
+            # A pre-existing OpenCode login is supported only as a legacy fallback.
+            if development and not os.environ.get("OPENCODE_AUTH_PATH"):
+                item.update(detail="Development mode will not read the live OpenCode credential store")
+                result[provider] = item
+                continue
             auth_path = OPENCODE_AUTH_PATH
             try:
                 with auth_path.open(encoding="utf-8") as handle:
@@ -100,7 +119,7 @@ def provider_state() -> dict[str, dict[str, Any]]:
                 if token.get("access") or token.get("refresh"):
                     expires = token.get("expires")
                     expired = isinstance(expires, (int, float)) and expires <= time.time() * 1000
-                    item.update(status="credential_found", detail="OpenCode Anthropic OAuth found; tokens hidden" + (" (refresh may be required)" if expired else ""))
+                    item.update(status="credential_found", detail="Legacy OpenCode Anthropic OAuth found; tokens hidden" + (" (refresh may be required)" if expired else ""))
             except (OSError, ValueError):
                 pass
         result[provider] = item
@@ -116,8 +135,23 @@ def router_health() -> dict[str, Any]:
         return {"reachable": False, "detail": f"Not reachable on 127.0.0.1:{router.PORT}", "error_type": type(exc).__name__}
 
 
+BUILTIN_MODELS = (
+    {"id": "gpt-6.1-sol", "provider": "openai", "name": "GPT-6.1 Sol"},
+    {"id": "gpt-6-luna", "provider": "openai", "name": "GPT-6 Luna"},
+    {"id": "claude-sonnet-5-5", "provider": "anthropic", "name": "Claude Sonnet 5.5"},
+    {"id": "claude-opus-5-5", "provider": "anthropic", "name": "Claude Opus 5.5"},
+    {"id": "k3.1-pro", "provider": "kimi", "name": "Kimi K3.1 Pro"},
+)
+
+
 def available_models() -> list[dict[str, str]]:
-    output = []
+    """Return built-in and locally cached provider models for the add menu.
+
+    Entries remain listed even when already configured so every provider has a
+    visible catalog. The interface marks configured routes instead of hiding
+    them, which avoids a misleading empty OpenAI or Claude section.
+    """
+    output = [dict(model) for model in BUILTIN_MODELS]
     for filename, provider in (("models_cache.json", "openai"), ("opencode-go-models.json", "opencode")):
         path = Path(router.CODEX_HOME) / filename
         try:
@@ -127,7 +161,59 @@ def available_models() -> list[dict[str, str]]:
                           for model in models if isinstance(model.get("slug"), str))
         except (OSError, ValueError, KeyError, TypeError):
             continue
-    return output
+    unique: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for model in output:
+        key = (model["provider"], model["id"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(model)
+    return unique
+
+
+def usage_path() -> Path:
+    return Path(os.environ.get("CODEX_ROUTER_USAGE_DB") or router.USAGE_PATH)
+
+
+def start_claude_oauth() -> dict[str, Any]:
+    flow, url = anthropic_oauth.start()
+    now = time.time()
+    with OAUTH_LOCK:
+        for state, pending in list(OAUTH_FLOWS.items()):
+            if pending.expired() or len(OAUTH_FLOWS) >= 8:
+                OAUTH_FLOWS.pop(state, None)
+        OAUTH_FLOWS[flow.state] = flow
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass
+    return {"auth_url": url, "expires_at": flow.expires_at, "message": "Finish sign-in in your browser, then paste the authorization code Claude shows here."}
+
+
+def complete_claude_oauth(pasted: Any) -> dict[str, Any]:
+    if not isinstance(pasted, str) or not pasted.strip():
+        raise ValueError("Paste the authorization code copied from Claude")
+    state = pasted.partition("#")[2].strip()
+    with OAUTH_LOCK:
+        for key, pending in list(OAUTH_FLOWS.items()):
+            if pending.expired():
+                OAUTH_FLOWS.pop(key, None)
+        if state:
+            flow = OAUTH_FLOWS.get(state)
+        else:
+            flow = next(iter(OAUTH_FLOWS.values())) if len(OAUTH_FLOWS) == 1 else None
+    if flow is None:
+        raise ValueError("No matching Claude sign-in was found. Start the sign-in again.")
+    result = anthropic_oauth.complete(flow, pasted)
+    with OAUTH_LOCK:
+        OAUTH_FLOWS.pop(flow.state, None)
+    return result
+
+
+def discover_local(endpoint: Any) -> list[dict[str, str]]:
+    if not isinstance(endpoint, str) or not endpoint.strip():
+        raise ValueError("Enter a loopback endpoint such as http://127.0.0.1:11434/v1")
+    return local_adapter.discover(endpoint.strip())
 
 
 def state() -> dict[str, Any]:
@@ -146,6 +232,8 @@ def state() -> dict[str, Any]:
         "available_models": available_models(),
         "settings_location": str(SETTINGS_PATH),
         "catalog_location": str(catalog_path),
+        "usage_location": str(usage_path()),
+        "usage": usage_store.dashboard(usage_path(), 30),
         "live_apply": os.environ.get("CODEX_ROUTER_DEV") != "1",
     }
 
@@ -165,9 +253,7 @@ def launch_login(provider: str) -> dict[str, Any]:
         arguments = [executable, "login"] if executable else None
         instruction = "Complete ChatGPT sign-in in the Codex window. This does not restart Codex."
     elif provider == "anthropic":
-        executable = shutil.which("opencode")
-        arguments = [executable, "auth", "login"] if executable else None
-        instruction = "Choose Anthropic, then Claude Pro/Max in OpenCode. Your separate Claude Code configuration is not changed."
+        raise ValueError("Use Relay's Claude sign-in flow; OpenCode is not required")
     else:
         raise ValueError("This provider uses an API key, not interactive sign-in")
     if not arguments:
@@ -232,11 +318,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         try:
-            if self.path == "/api/state":
+            parsed = urllib.parse.urlsplit(self.path)
+            if parsed.path == "/api/state":
                 self.reply(200, state())
-            elif self.path == "/api/diagnostics":
+            elif parsed.path == "/api/usage":
+                query = urllib.parse.parse_qs(parsed.query)
+                try:
+                    days = max(1, min(365, int((query.get("days") or ["30"])[0])))
+                except ValueError:
+                    raise ValueError("Usage days must be an integer from 1 through 365") from None
+                self.reply(200, usage_store.dashboard(usage_path(), days))
+            elif parsed.path == "/api/subscription-usage":
+                self.reply(200, subscription_usage.collect(router.CODEX_HOME))
+            elif parsed.path == "/api/diagnostics":
                 self.reply(200, {"router": router_health(), "log": redacted_log()})
-            elif self.path.startswith("/api/"):
+            elif parsed.path.startswith("/api/"):
                 self.reply(404, {"error": "Not found"})
             else:
                 self.serve_static()
@@ -286,6 +382,13 @@ class Handler(BaseHTTPRequestHandler):
                     except (OSError, ValueError, urllib.error.URLError):
                         pass
                 self.reply(200, {"ok": True, "models": models, "router_reloaded": reloaded, "codex_default_updated": default_updated, "message": message})
+            elif self.path == "/api/oauth/anthropic/start":
+                self.reply(200, start_claude_oauth())
+            elif self.path == "/api/oauth/anthropic/complete":
+                self.reply(200, complete_claude_oauth(body.get("code")))
+            elif self.path == "/api/local/discover":
+                models = discover_local(body.get("endpoint"))
+                self.reply(200, {"ok": True, "models": models})
             elif self.path == "/api/credential":
                 provider = body.get("provider")
                 expected = {"opencode": "OPENCODE_API_KEY", "kimi": "KIMI_API_KEY"}.get(str(provider))
@@ -293,7 +396,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not expected or not isinstance(value, str) or not 8 <= len(value.strip()) <= 4096:
                     raise ValueError("Choose Kimi or OpenCode and enter a valid API key")
                 _set_user_env(expected, value.strip())
-                self.reply(200, {"ok": True, "message": f"{expected} saved in the current-user environment. The value was not retained by the GUI."})
+                self.reply(200, {"ok": True, "message": f"{expected} saved in the current-user credential store. The value was not retained by the GUI."})
             elif self.path == "/api/login":
                 self.reply(200, launch_login(str(body.get("provider"))))
             elif self.path == "/api/open-docs":

@@ -15,14 +15,17 @@
 - [x] Add atomic saves and timestamped backups.
 - [x] Add isolated validation that does not restart Codex or the router.
 - [x] Keep credentials separate from shareable model preferences.
+- [x] Separate stable picker route IDs from editable upstream model IDs.
 
 ## Phase 3 — Relay desktop GUI
 
 - [x] Provider dashboard with connection status and sign-in actions.
-- [x] Model customization: show/hide, rename, reorder, add/remove, and choose the default.
+- [x] Grouped add-model dropdown and click-to-edit existing rows.
+- [x] Model show/hide, rename, order, remove, route ID, upstream ID, and default selection.
 - [x] Thinking-level editor constrained by each model's capabilities.
 - [x] Tool-policy editor for shell, Computer Use, web search, and connected apps.
-- [x] Per-model subagent catalog controls.
+- [x] Cross-provider subagent catalog controls.
+- [x] Usage dashboard with account, model, daily, and recent-request views.
 - [x] Sanitized logs and diagnostics with secret redaction.
 - [x] Responsive production UI served directly by the local manager.
 
@@ -32,6 +35,7 @@
 - [x] Generate a new catalog without restarting Codex.
 - [x] Provide explicit save and apply/reload controls.
 - [x] Preserve unrelated projects, plugins, providers, and credentials in `config.toml`.
+- [x] Enable Codex agents while preserving other `[agents]` settings.
 - [x] Update the selected default model and its own reasoning effort without restarting Codex.
 - [x] Keep active Codex conversations running; picker changes may appear in new chats.
 - [ ] Add automatic transactional rollback across settings, catalog, and config updates.
@@ -39,16 +43,35 @@
 
 ## Phase 5 — Packaging and contributor workflow
 
-- [x] Add automated Python tests for settings, routing, stream translation, Computer Use, tool policies, installer merging, Apply safety, diagnostics, and catalog generation.
-- [x] Add isolated rendered-UI checks for all main pages.
+- [x] Add automated Python tests for settings, routing, OAuth, local adapters, usage, stream translation, Computer Use, tool policies, installer merging, Apply safety, diagnostics, and catalog generation.
+- [x] Add isolated rendered-UI checks for Overview, Models, Connections, Usage, and Capabilities.
 - [x] Add a repeatable installer with backups and preservation-focused Codex configuration merging.
-- [x] Add Windows CI for unit tests, source validation, production build, and rendered UI.
+- [x] Add Windows, Linux, and macOS CI for unit tests, source validation, production build, and rendered UI.
+- [x] Add allowlisted release archives, portable launchers, checksums, and tag-triggered GitHub publishing.
+- [x] Add protected current-user credential storage for Linux and macOS.
 - [ ] Add a dedicated uninstaller with preview and rollback support.
-- [ ] Formalize release versioning and changelog automation.
+- [x] Formalize release versioning and changelog practice for `0.3.0`.
+- [ ] Add signed and notarized native installers.
+
+## Phase 6 — Accounts, local models, and delegation
+
+- [x] Add Relay-owned Claude PKCE OAuth without requiring OpenCode.
+- [x] Add Claude token refresh and expiry status.
+- [x] Add Ollama/LM Studio/custom loopback model discovery and editing.
+- [x] Add OpenAI Chat Completions and Responses local protocol adapters.
+- [x] Add streaming function/custom-tool and Computer Use translation for local models.
+- [x] Add usage capture across every connected provider/account and local endpoint.
+- [x] Add a credential-free local usage ledger and UI.
+- [x] Add live Codex, Claude, and Kimi subscription allowance cards with reset times.
+- [x] Populate Add model with OpenAI, Claude, Kimi, and OpenCode provider catalogs.
+- [x] Apply the blue Relay interface theme.
+- [x] Enable any eligible model as a cross-provider child-agent target.
+- [x] Ship Windows, Linux, and macOS release archives for `0.3.0`.
 
 ## Next
 
 1. Implement automatic rollback and a backup browser.
-2. Add a tested uninstaller that never deletes provider credential stores.
-3. Add opt-in live compatibility tests that use temporary homes and mock upstream responses.
-4. Expand provider-specific Computer Use and connected-tool capability reporting.
+2. Add a tested cross-platform uninstaller that never deletes provider credential stores.
+3. Add optional OS keychain integration for Relay credentials.
+4. Add signed and notarized native installers.
+5. Expand opt-in live compatibility tests for local servers and provider-specific Computer Use.

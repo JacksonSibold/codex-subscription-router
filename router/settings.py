@@ -6,21 +6,31 @@ import json
 import os
 import re
 import tempfile
+import ipaddress
 from datetime import datetime, timezone
+from urllib.parse import urlsplit, urlunsplit
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
-PROVIDERS = ("openai", "opencode", "anthropic", "kimi")
+PROVIDERS = ("openai", "opencode", "anthropic", "kimi", "local")
+LOCAL_PROTOCOLS = ("openai_chat", "openai_responses")
 MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+UPSTREAM_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
+CREDENTIAL_ENV = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
 SECRET_NAME = re.compile(r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|secret)", re.I)
 SECRET_VALUE = re.compile(r"(?:sk-[A-Za-z0-9_-]{16,}|gho_[A-Za-z0-9]{20,}|Bearer\s+\S+)", re.I)
+LEGACY_CLAUDE_NAMES = {
+    "Claude Sonnet 5.5 — Claude Pro": "Claude Sonnet 5.5 — Claude",
+    "Claude Opus 5.5 — Claude Pro": "Claude Opus 5.5 — Claude",
+}
 
 
 def _model(model_id: str, provider: str, name: str, default: str, efforts: list[str]) -> dict[str, Any]:
     return {
         "id": model_id,
+        "upstream_id": model_id,
         "provider": provider,
         "display_name": name,
         "visible": True,
@@ -46,8 +56,8 @@ def default_settings() -> dict[str, Any]:
         _model("beam-free", "opencode", "Beam Free — OpenCode Go", "medium", ["low", "medium", "high", "xhigh", "max"]),
         _model("glm-5.3-flash", "opencode", "GLM-5.3 Flash — OpenCode Go", "high", ["low", "high", "max"]),
         _model("kimi-k3.1-pro", "opencode", "Kimi K3.1 Pro — OpenCode Go", "max", ["low", "high", "max"]),
-        _model("claude-sonnet-5-5", "anthropic", "Claude Sonnet 5.5 — Claude Pro", "medium", list(EFFORTS[1:])),
-        _model("claude-opus-5-5", "anthropic", "Claude Opus 5.5 — Claude Pro", "medium", list(EFFORTS[1:])),
+        _model("claude-sonnet-5-5", "anthropic", "Claude Sonnet 5.5 — Claude", "medium", list(EFFORTS[1:])),
+        _model("claude-opus-5-5", "anthropic", "Claude Opus 5.5 — Claude", "medium", list(EFFORTS[1:])),
         _model("k3.1-pro", "kimi", "Kimi K3.1 Pro — Kimi Membership", "max", ["low", "high", "max"]),
     ]
     return {
@@ -56,11 +66,67 @@ def default_settings() -> dict[str, Any]:
         "providers": {
             "openai": {"enabled": True, "auth_method": "codex", "credential_env": None},
             "opencode": {"enabled": True, "auth_method": "api_key", "credential_env": "OPENCODE_API_KEY"},
-            "anthropic": {"enabled": True, "auth_method": "opencode_oauth", "credential_env": None},
+            "anthropic": {"enabled": True, "auth_method": "relay_oauth", "credential_env": None},
             "kimi": {"enabled": True, "auth_method": "api_key", "credential_env": "KIMI_API_KEY"},
+            "local": {"enabled": True, "auth_method": "none", "credential_env": None},
         },
         "models": models,
     }
+
+
+def _upgrade_v1(document: Any) -> dict[str, Any]:
+    """Add Relay-owned OAuth and the local-provider lane without losing preferences."""
+    if not isinstance(document, dict) or document.get("version") != 1:
+        return document
+    upgraded = copy.deepcopy(document)
+    upgraded["version"] = SCHEMA_VERSION
+    providers = upgraded.setdefault("providers", {})
+    if isinstance(providers, dict):
+        providers.setdefault("local", {"enabled": True, "auth_method": "none", "credential_env": None})
+        anthropic = providers.get("anthropic")
+        if isinstance(anthropic, dict) and anthropic.get("auth_method") == "opencode_oauth":
+            anthropic["auth_method"] = "relay_oauth"
+    for model in upgraded.get("models", []):
+        if isinstance(model, dict) and isinstance(model.get("id"), str):
+            model.setdefault("upstream_id", model["id"])
+    return upgraded
+
+
+def normalize_local_endpoint(value: Any) -> str:
+    """Return a loopback-only base URL for an OpenAI-compatible local server."""
+    if not isinstance(value, str) or not value.strip() or len(value) > 2048:
+        _fail("model.local.endpoint", "expected an HTTP loopback URL")
+    raw = value.strip()
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        _fail("model.local.endpoint", "invalid URL")
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+        _fail("model.local.endpoint", "expected an http:// or https:// loopback URL")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        _fail("model.local.endpoint", "credentials, query strings, and fragments are not allowed")
+    try:
+        loopback = parsed.hostname.lower() == "localhost" or ipaddress.ip_address(parsed.hostname).is_loopback
+    except ValueError:
+        loopback = False
+    if not loopback:
+        _fail("model.local.endpoint", "only localhost or loopback IP addresses are allowed")
+    try:
+        port = parsed.port
+    except ValueError:
+        _fail("model.local.endpoint", "invalid port")
+    if port is None:
+        port = 443 if parsed.scheme.lower() == "https" else 80
+    path = parsed.path.rstrip("/")
+    for suffix in ("/chat/completions", "/responses"):
+        if path.endswith(suffix):
+            path = path[:-len(suffix)].rstrip("/")
+            break
+    host = parsed.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = f"{host}:{port}"
+    return urlunsplit((parsed.scheme.lower(), netloc, path, "", ""))
 
 
 def _fail(path: str, message: str) -> None:
@@ -81,10 +147,15 @@ def _secret_scan(value: Any, path: str = "settings") -> None:
 
 
 def validate(document: Any) -> dict[str, Any]:
+    document = _upgrade_v1(document)
     if not isinstance(document, dict):
         raise ValueError("settings: expected a JSON object")
     if document.get("version") != SCHEMA_VERSION:
         _fail("version", f"expected {SCHEMA_VERSION}")
+    document = copy.deepcopy(document)
+    for model in document.get("models", []):
+        if isinstance(model, dict) and isinstance(model.get("id"), str):
+            model.setdefault("upstream_id", model["id"])
     runtime = document.get("runtime")
     providers = document.get("providers")
     models = document.get("models")
@@ -111,11 +182,27 @@ def validate(document: Any) -> dict[str, Any]:
         if model_id in seen:
             _fail(path + ".id", "model IDs must be unique across providers")
         seen.add(model_id)
+        upstream_id = model.get("upstream_id")
+        if not isinstance(upstream_id, str) or not UPSTREAM_ID.fullmatch(upstream_id):
+            _fail(path + ".upstream_id", "use 1-200 letters, numbers, dots, slashes, colons, underscores, or hyphens")
         if provider not in PROVIDERS:
             _fail(path + ".provider", "unknown provider")
+        if provider == "local":
+            local = model.get("local")
+            if not isinstance(local, dict):
+                _fail(path + ".local", "local models require endpoint and protocol")
+            if local.get("protocol") not in LOCAL_PROTOCOLS:
+                _fail(path + ".local.protocol", "expected openai_chat or openai_responses")
+            normalize_local_endpoint(local.get("endpoint"))
+            credential_env = local.get("credential_env")
+            if credential_env is not None and (not isinstance(credential_env, str) or not CREDENTIAL_ENV.fullmatch(credential_env)):
+                _fail(path + ".local.credential_env", "expected an uppercase credential variable name or null")
         name = model.get("display_name")
         if not isinstance(name, str) or not name.strip() or len(name) > 120:
             _fail(path + ".display_name", "expected 1-120 non-whitespace characters")
+        if provider == "anthropic" and name in LEGACY_CLAUDE_NAMES:
+            name = LEGACY_CLAUDE_NAMES[name]
+            model["display_name"] = name
         if not isinstance(model.get("visible"), bool) or not isinstance(model.get("subagents"), bool):
             _fail(path, "visible and subagents must be booleans")
         reasoning = model.get("reasoning")
@@ -148,7 +235,11 @@ def validate(document: Any) -> dict[str, Any]:
     if not selected["visible"] or not providers[selected["provider"]]["enabled"]:
         _fail("runtime.default_model", "default model must be visible and use an enabled provider")
     _secret_scan(document)
-    return copy.deepcopy(document)
+    clean = document
+    for model in clean["models"]:
+        if model["provider"] == "local":
+            model["local"]["endpoint"] = normalize_local_endpoint(model["local"]["endpoint"])
+    return clean
 
 
 def load(path: str | os.PathLike[str]) -> dict[str, Any]:

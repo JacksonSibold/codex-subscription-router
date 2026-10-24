@@ -3,10 +3,9 @@
 The app talks to a single model provider. This router is that provider: it listens on
 127.0.0.1 and sends each request upstream by the request's "model":
 
-  * OpenCode Go models (opencode-go-models.json, minus OPENAI_MODELS) -> opencode.ai,
-    authenticated with OPENCODE_API_KEY. The ChatGPT login is never forwarded there.
-  * everything else -> OpenAI's Codex backend, on the ChatGPT login the app attaches
-    (provider has requires_openai_auth = true).
+  * OpenAI models -> OpenAI's Codex backend on Codex's attached ChatGPT login.
+  * OpenCode Go, Kimi, Claude, and local models -> their isolated lanes and credentials.
+  * The ChatGPT login is never forwarded to a third-party or local endpoint.
 
 Requests bound for OpenCode are trimmed to what a standard Responses API accepts, and
 reasoning items one lane produced are not replayed to the other.
@@ -20,12 +19,16 @@ import ssl
 import sys
 import threading
 import time
-import winreg
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 import anthropic_adapter
+import anthropic_oauth
+import credentials
+import local_adapter
 import namespace_tools
 import settings as router_settings
+import usage_store
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CODEX_HOME = os.environ.get("CODEX_HOME") or os.path.dirname(HERE)
@@ -35,6 +38,7 @@ HOST = "127.0.0.1"
 PORT = int(os.environ.get("CODEX_ROUTER_PORT") or ACTIVE_SETTINGS["runtime"]["port"])
 LOG_PATH = os.path.join(HERE, "router.log")
 ORIGINS_PATH = os.path.join(HERE, "reasoning-origins.json")
+USAGE_PATH = os.environ.get("CODEX_ROUTER_USAGE_DB") or os.path.join(HERE, "router-usage.sqlite")
 
 
 def reload_settings(document=None):
@@ -68,6 +72,7 @@ UPSTREAM_HEADERS = {"content-type", "accept", "user-agent", "openai-beta", "orig
 # some upstreams such as xAI reject them) and OpenAI's hosted web search.
 OPENAI_ONLY_TOOLS = ("namespace", "web_search")
 SSL_CTX = ssl.create_default_context()
+HTTPS_CONNECTION = http.client.HTTPSConnection
 MAX_ORIGINS = 20000
 
 log_lock = threading.Lock()
@@ -119,28 +124,37 @@ def build_catalog(document=None, output_path=None):
     descriptions = {
         "openai": "OpenAI model through your existing Codex sign-in",
         "opencode": "OpenCode Go subscription model",
-        "anthropic": "Claude Pro subscription via OpenCode OAuth",
+        "anthropic": "Claude subscription through Relay-owned OAuth",
         "kimi": "Kimi Code membership through the native Kimi Responses API",
+        "local": "Local model through a loopback OpenAI-compatible endpoint",
     }
     for preference in document["models"]:
         provider = preference["provider"]
         if not preference["visible"] or not document["providers"][provider]["enabled"]:
             continue
         slug = preference["id"]
+        upstream_id = preference["upstream_id"]
         if provider == "openai":
-            if slug not in cache:
+            if upstream_id not in cache:
                 continue
-            item = copy.deepcopy(cache[slug])
+            item = copy.deepcopy(cache[upstream_id])
         elif provider == "opencode":
-            if slug not in go:
+            if upstream_id not in go:
                 continue
-            item = {**copy.deepcopy(go[slug]), **OPENCODE_CATALOG_OVERRIDES}
+            item = {**copy.deepcopy(go[upstream_id]), **OPENCODE_CATALOG_OVERRIDES}
         else:
             item = copy.deepcopy(template)
             item.update({"supported_in_api": True, "input_modalities": ["text", "image"],
                          "supports_reasoning_effort_updates": True, "supports_search_tool": False})
             if provider == "anthropic":
                 item.update({"context_window": 200000, "max_context_window": 1000000})
+            elif provider == "local":
+                item.update({"shell_type": "shell_command", "apply_patch_tool_type": "freeform",
+                             "input_modalities": ["text"], "context_window": 131072,
+                             "max_context_window": 131072,
+                             "truncation_policy": {"mode": "bytes", "limit": 10000},
+                             "supports_reasoning_summaries": True, "default_reasoning_summary": "none",
+                             "support_verbosity": False})
             else:
                 item.update({"shell_type": "shell_command", "apply_patch_tool_type": "freeform",
                              "context_window": 1048576, "max_context_window": 1048576,
@@ -156,7 +170,7 @@ def build_catalog(document=None, output_path=None):
             "supports_reasoning_effort_updates": bool(reasoning["supported"]),
             "supports_search_tool": tools["web_search"],
             "node_repl_disabled": not tools["computer_use"],
-            "multi_agent_version": "v2" if preference["subagents"] else None,
+            "multi_agent_version": "v2" if preference["subagents"] else "disabled",
         })
         if not tools["shell"]:
             item["shell_type"] = None
@@ -171,21 +185,45 @@ def build_catalog(document=None, output_path=None):
     return [m["slug"] for m in picks]
 
 
+def _required_key(name):
+    key = credentials.get_secret(name)
+    if not key:
+        raise credentials.CredentialError(f"{name} is not configured")
+    return key
+
+
 def opencode_key():
-    key = os.environ.get("OPENCODE_API_KEY")
-    if key:
-        return key
-    # A process started before the variable was set won't have it; read the user's env directly.
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as k:
-        return winreg.QueryValueEx(k, "OPENCODE_API_KEY")[0]
+    return _required_key("OPENCODE_API_KEY")
 
 
 def kimi_key():
-    key = os.environ.get("KIMI_API_KEY")
-    if key:
-        return key
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as k:
-        return winreg.QueryValueEx(k, "KIMI_API_KEY")[0]
+    return _required_key("KIMI_API_KEY")
+
+
+def usage_account(lane, preference=None):
+    """Return a stable, non-secret account label for the usage ledger."""
+    if lane == "openai":
+        return "Codex account"
+    if lane == "opencode":
+        return "OpenCode API key"
+    if lane == "kimi":
+        return "Kimi API key"
+    if lane == "anthropic":
+        return "Claude Relay OAuth" if anthropic_oauth.load_tokens() else "OpenCode fallback"
+    if lane == "local" and preference:
+        endpoint = preference.get("local", {}).get("endpoint", "")
+        host = urlsplit(endpoint).netloc or "local endpoint"
+        return "Local · " + host
+    return lane
+
+
+def record_usage(preference, lane, model, status, usage):
+    try:
+        provider = preference["provider"] if preference else lane
+        usage_store.record(USAGE_PATH, provider, usage_account(lane, preference),
+                           str(model or "unknown"), status, usage)
+    except Exception as exc:
+        log(f"ERROR usage ledger: {type(exc).__name__}")
 
 
 def load_origins():
@@ -295,31 +333,46 @@ def apply_tool_policy(body, preference):
 
 
 class SseReasoningScanner:
-    """Collects fingerprints of reasoning items in a streamed Responses API reply."""
+    """Collect reasoning fingerprints and terminal token usage from Responses SSE."""
 
     def __init__(self):
         self.buf = b""
         self.found = []
+        self.usage = {}
+
+    def _event(self, event):
+        for line in event.split(b"\n"):
+            if not line.startswith(b"data:"):
+                continue
+            try:
+                data = json.loads(line[5:])
+            except ValueError:
+                continue
+            if not isinstance(data, dict):
+                continue
+            kind = data.get("type")
+            if kind in ("response.completed", "response.incomplete", "response.failed", "response.done"):
+                response = data.get("response") if isinstance(data.get("response"), dict) else data
+                usage = response.get("usage")
+                if isinstance(usage, dict):
+                    self.usage = usage
+            item = data.get("item")
+            if kind == "response.output_item.done" and isinstance(item, dict) \
+                    and item.get("type") == "reasoning":
+                fp = fingerprint(item)
+                if fp:
+                    self.found.append(fp)
 
     def feed(self, chunk):
         self.buf += chunk
         *events, self.buf = self.buf.split(b"\n\n")
-        for ev in events:
-            if b'"reasoning"' not in ev:
-                continue
-            for line in ev.split(b"\n"):
-                if not line.startswith(b"data:"):
-                    continue
-                try:
-                    data = json.loads(line[5:])
-                except ValueError:
-                    continue
-                item = data.get("item") if isinstance(data, dict) else None
-                if data.get("type") == "response.output_item.done" and isinstance(item, dict) \
-                        and item.get("type") == "reasoning":
-                    fp = fingerprint(item)
-                    if fp:
-                        self.found.append(fp)
+        for event in events:
+            self._event(event)
+
+    def finish(self):
+        rest, self.buf = self.buf, b""
+        if rest:
+            self._event(rest)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -393,14 +446,32 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
             self.wfile.flush()
 
-    def route_anthropic(self, body, model, started, dropped):
-        status, sent = anthropic_adapter.run(
+    def route_anthropic(self, body, model, preference, started, dropped):
+        status, sent, usage = anthropic_adapter.run(
             body, self.bridge_start, self.bridge_emit, self.bridge_raw, log)
         if getattr(self, "_bridge_chunked", False):
             self.wfile.write(b"0\r\n\r\n")
             self.wfile.flush()
+        record_usage(preference, "anthropic", model, status, usage)
         log(f"{self.command} {self.path} model={model} lane=anthropic status={status} bytes={sent} "
             f"dropped_reasoning={dropped} {time.time() - started:.1f}s")
+
+    def route_local(self, body, model, preference, started, dropped, ns_map):
+        local = preference.get("local") or {}
+        if local.get("protocol") == "openai_chat":
+            status, sent, usage = local_adapter.run_chat(
+                body, local, self.bridge_start, self.bridge_emit, self.bridge_raw, log,
+                local.get("endpoint", ""), ns_map)
+        else:
+            status, sent, usage = local_adapter.run_responses(
+                body, local, self.bridge_start, self.bridge_raw, log,
+                local.get("endpoint", ""), ns_map)
+        if getattr(self, "_bridge_chunked", False):
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        record_usage(preference, "local", model, status, usage)
+        log(f"{self.command} {self.path} model={model} lane=local protocol={local.get('protocol')} "
+            f"status={status} bytes={sent} dropped_reasoning={dropped} {time.time() - started:.1f}s")
 
     def route(self, raw):
         started = time.time()
@@ -416,42 +487,59 @@ class Handler(BaseHTTPRequestHandler):
         preference = next((m for m in snapshot["models"] if m["id"] == model), None)
         if preference and not snapshot["providers"][preference["provider"]]["enabled"]:
             self.respond_json(400, {"error": {"message": f"Provider is disabled for model: {model}"}})
+            record_usage(preference, preference["provider"], model, 400, {})
             return
         if preference:
             lane = preference["provider"]
         if isinstance(body, dict):
+            if preference:
+                # Codex sees the stable picker slug; providers receive their own model identifier.
+                body["model"] = preference["upstream_id"]
             dropped = drop_foreign_reasoning(body, lane)
             policy_changed = apply_tool_policy(body, preference) if preference else False
             if lane == "anthropic":
-                return self.route_anthropic(body, model, started, dropped)
+                return self.route_anthropic(body, model, preference, started, dropped)
             flattened = False
-            if lane in ("opencode", "kimi"):
+            if lane in ("opencode", "kimi", "local"):
                 # Flatten Computer Use before removing unsupported connected-app namespaces.
                 ns_map, flattened = namespace_tools.flatten_request(body)
-            tidied = tidy_for_opencode(body) if lane in ("opencode", "kimi") else False
-            if dropped or tidied or flattened or policy_changed:
+            tidied = tidy_for_opencode(body) if lane in ("opencode", "kimi", "local") else False
+            if dropped or tidied or flattened or policy_changed or preference:
                 raw = json.dumps(body).encode()
+            if lane == "local":
+                if not preference:
+                    self.respond_json(400, {"error": {"message": f"Unknown local model: {model}"}})
+                    return
+                return self.route_local(body, model, preference, started, dropped, ns_map)
 
-        host, prefix = LANES[lane]
-        if lane in ("opencode", "kimi"):
-            # Forward Codex's real User-Agent, but never forward its ChatGPT credential.
-            headers = {k: v for k, v in self.headers.items() if k.lower() in UPSTREAM_HEADERS}
-            headers["Authorization"] = "Bearer " + (opencode_key() if lane == "opencode" else kimi_key())
-            if lane == "opencode":
-                # Go wants one stable id per conversation for routing and prompt caching.
-                session = self.headers.get("thread-id") or self.headers.get("session-id")
-                if session:
-                    headers["x-opencode-session"] = session
-        else:
-            headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP_BY_HOP}
-        headers["Accept-Encoding"] = "identity"
-        if raw:
-            headers["Content-Length"] = str(len(raw))
+        try:
+            host, prefix = LANES[lane]
+            if lane in ("opencode", "kimi"):
+                # Forward Codex's real User-Agent, but never forward its ChatGPT credential.
+                headers = {k: v for k, v in self.headers.items() if k.lower() in UPSTREAM_HEADERS}
+                headers["Authorization"] = "Bearer " + (opencode_key() if lane == "opencode" else kimi_key())
+                if lane == "opencode":
+                    # Go wants one stable id per conversation for routing and prompt caching.
+                    session = self.headers.get("thread-id") or self.headers.get("session-id")
+                    if session:
+                        headers["x-opencode-session"] = session
+            else:
+                headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP_BY_HOP}
+            headers["Accept-Encoding"] = "identity"
+            if raw:
+                headers["Content-Length"] = str(len(raw))
+        except Exception as exc:
+            message = f"model router: {lane} credential unavailable: {exc}"
+            self.respond_json(502, {"error": {"message": message}})
+            record_usage(preference, lane, model, 502, {})
+            log(f"ERROR {message}")
+            return
 
         status, sent, scanner = 502, 0, SseReasoningScanner()
         rewriter = namespace_tools.SseRewriter(ns_map)
+        response_started = False
         try:
-            conn = http.client.HTTPSConnection(host, timeout=600, context=SSL_CTX)
+            conn = HTTPS_CONNECTION(host, timeout=600, context=SSL_CTX)
             conn.request(self.command, prefix + self.path, body=raw or None, headers=headers)
             resp = conn.getresponse()
             status = resp.status
@@ -461,6 +549,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_header(k, v)
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
+            response_started = True
             while True:
                 chunk = resp.read1(65536)
                 if not chunk:
@@ -474,10 +563,12 @@ class Handler(BaseHTTPRequestHandler):
             tail = rewriter.flush()
             if tail:
                 self.wfile.write(b"%x\r\n%s\r\n" % (len(tail), tail))
+            scanner.finish()
             self.wfile.write(b"0\r\n\r\n")
             conn.close()
         except Exception as e:  # upstream unreachable, or the app hung up mid-stream
-            if sent == 0 and status == 502:
+            if not response_started:
+                status = 502
                 msg = json.dumps({"error": {"message": f"model router: {lane} upstream failed: {e}"}}).encode()
                 self.send_response(502)
                 self.send_header("Content-Type", "application/json")
@@ -485,13 +576,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(msg)
             log(f"ERROR {lane} {self.path} model={model}: {e!r}")
+        record_usage(preference, lane, model, status, scanner.usage)
         if os.environ.get("ROUTER_DUMP_DIR"):  # debugging aid: keep the exact request sent upstream
             with open(os.path.join(os.environ["ROUTER_DUMP_DIR"], f"{lane}-{model}-{int(started * 1000)}.json"), "wb") as f:
                 f.write(raw)
         remember_origins(scanner.found, lane)
         log(f"{self.command} {self.path} model={model} lane={lane} status={status} bytes={sent} "
             f"ns_tools={len(ns_map)} dropped_reasoning={dropped}{' ENCODED-BODY' if encoded else ''} {time.time() - started:.1f}s")
-
 
 def main():
     try:

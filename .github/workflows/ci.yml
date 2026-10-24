@@ -10,13 +10,17 @@ permissions:
 
 jobs:
   test:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "24"
           cache: npm
@@ -31,6 +35,11 @@ jobs:
       - name: Production interface build
         working-directory: app
         run: npm run build
+      - name: Install Chrome for rendered UI checks
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@v1
       - name: Isolated API and rendered UI checks
         working-directory: app
+        env:
+          CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
         run: npm run test:ui

@@ -71,7 +71,7 @@ def configure_codex(path: Path, default_model: str, reasoning_effort: str | None
         header = _remove_toml_key(header, "model_reasoning_effort")
     result = header.rstrip() + "\n\n" + rest.lstrip("\n")
     result = _set_toml_table(result, "model_providers.mixed", {
-        "name": '"Relay — OpenAI + OpenCode Go + Claude Pro + Kimi"',
+        "name": '"Relay — OpenAI + OpenCode Go + Claude + Kimi + Local"',
         "base_url": '"http://127.0.0.1:18765"',
         "wire_api": '"responses"',
         "requires_openai_auth": "true",
@@ -80,6 +80,7 @@ def configure_codex(path: Path, default_model: str, reasoning_effort: str | None
     result = _set_toml_table(result, "desktop", {
         "enabled-reasoning-efforts": '["minimal", "low", "medium", "high", "xhigh", "max"]',
     })
+    result = _set_toml_table(result, "agents", {"enabled": "true"})
     tomllib.loads(result)
     atomic_write(path, result)
 
@@ -103,8 +104,10 @@ def install(codex_home: Path, configure: bool) -> None:
     if (target / "app").exists():
         shutil.rmtree(target / "app")
     shutil.copytree(static, target / "app")
-    for name in ("Start Relay.cmd", "Start Router.cmd"):
-        shutil.copy2(ROOT / name, codex_home / name)
+    for name in ("Start Relay.cmd", "Start Router.cmd", "Start Relay.sh", "Start Router.sh", "Start Relay.command", "Start Router.command"):
+        source = ROOT / name
+        if source.is_file():
+            shutil.copy2(source, codex_home / name)
     catalog_target = codex_home / "opencode-go-models.json"
     if catalog_target.exists():
         shutil.copy2(catalog_target, catalog_target.with_name(catalog_target.name + ".backup-" + STAMP))

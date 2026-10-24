@@ -1,9 +1,7 @@
-"""Bridge Codex Responses requests to Anthropic Messages using OpenCode's Claude OAuth.
+"""Bridge Codex Responses requests to Anthropic Messages.
 
-This module intentionally exposes a narrow transport: Codex chooses one of the
-Claude Pro models in the router catalog, and this bridge translates the request
-and stream back into Responses API events. OAuth credentials are read from the
-same file OpenCode uses and refreshed atomically when necessary.
+Relay owns the primary Claude OAuth connection. Existing OpenCode Anthropic
+tokens are accepted as a fallback for installations that already used them.
 """
 from __future__ import annotations
 
@@ -20,9 +18,11 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
+import anthropic_oauth
+
 ANTHROPIC_MODELS = {"claude-sonnet-5-5", "claude-opus-5-5"}
 
-AUTH_PATH = Path.home() / ".local" / "share" / "opencode" / "auth.json"
+AUTH_PATH = Path(os.environ.get("OPENCODE_AUTH_PATH") or Path.home() / ".local" / "share" / "opencode" / "auth.json")
 TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 SCOPES = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins"
@@ -91,14 +91,21 @@ def _refresh_auth(log: Callable[[str], None]) -> str:
 
 
 def access_token(log: Callable[[str], None]) -> str:
-    with _auth_lock:
-        auth = _read_auth()
-        token = auth.get("anthropic") or {}
-        access = token.get("access")
-        expires = token.get("expires")
-        if isinstance(access, str) and access and isinstance(expires, (int, float)) and expires > time.time() * 1000 + REFRESH_BUFFER_MS:
-            return access
-        return _refresh_auth(log)
+    """Prefer Relay's own OAuth token, then fall back to a pre-existing OpenCode token."""
+    try:
+        return anthropic_oauth.access_token(log)
+    except RuntimeError as relay_error:
+        try:
+            with _auth_lock:
+                auth = _read_auth()
+                token = auth.get("anthropic") or {}
+                access = token.get("access")
+                expires = token.get("expires")
+                if isinstance(access, str) and access and isinstance(expires, (int, float)) and expires > time.time() * 1000 + REFRESH_BUFFER_MS:
+                    return access
+                return _refresh_auth(log)
+        except FileNotFoundError:
+            raise RuntimeError("Claude is not connected. Connect it in Relay's Connections page.") from relay_error
 
 
 def _text_from_content(content: Any) -> str:
@@ -560,7 +567,7 @@ def run(
     emit: Callable[[str, dict[str, Any]], None],
     write_raw: Callable[[bytes], None],
     log: Callable[[str], None],
-) -> tuple[int, int]:
+) -> tuple[int, int, dict[str, Any]]:
     payload, tool_kinds = build_payload(body)
     token = access_token(log)
     session_id = str(body.get("prompt_cache_key") or uuid.uuid4())
@@ -574,7 +581,7 @@ def run(
             error = resp.read()
             start(resp.status, [("Content-Type", "application/json"), ("Content-Length", str(len(error)))])
             write_raw(error)
-            return resp.status, len(error)
+            return resp.status, len(error), {}
 
         start(200, [("Content-Type", "text/event-stream; charset=utf-8")])
         translator = ResponsesTranslator(str(body.get("model")), tool_kinds, emit)
@@ -601,7 +608,7 @@ def run(
                 err = data.get("error") or {}
                 translator.fail(str(err.get("message") or "Anthropic streaming error"))
         translator.finish()
-        return 200, sent
+        return 200, sent, dict(translator.usage)
     except Exception as exc:
         log(f"ERROR anthropic stream: {exc!r}")
         try:
@@ -609,6 +616,6 @@ def run(
             write_raw(json.dumps({"error": {"message": f"Anthropic bridge failed: {exc}"}}).encode())
         except Exception:
             pass
-        return 502, sent
+        return 502, sent, {}
     finally:
         conn.close()

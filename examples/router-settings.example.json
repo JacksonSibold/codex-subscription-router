@@ -1,34 +1,110 @@
 {
-  "version": 1,
+  "version": 2,
   "runtime": {
     "host": "127.0.0.1",
     "port": 18765,
     "default_model": "claude-opus-5-5"
   },
   "providers": {
-    "openai": { "enabled": true, "auth_method": "codex", "credential_env": null },
-    "opencode": { "enabled": true, "auth_method": "api_key", "credential_env": "OPENCODE_API_KEY" },
-    "anthropic": { "enabled": true, "auth_method": "opencode_oauth", "credential_env": null },
-    "kimi": { "enabled": true, "auth_method": "api_key", "credential_env": "KIMI_API_KEY" }
+    "openai": {
+      "enabled": true,
+      "auth_method": "codex",
+      "credential_env": null
+    },
+    "opencode": {
+      "enabled": true,
+      "auth_method": "api_key",
+      "credential_env": "OPENCODE_API_KEY"
+    },
+    "anthropic": {
+      "enabled": true,
+      "auth_method": "relay_oauth",
+      "credential_env": null
+    },
+    "kimi": {
+      "enabled": true,
+      "auth_method": "api_key",
+      "credential_env": "KIMI_API_KEY"
+    },
+    "local": {
+      "enabled": true,
+      "auth_method": "none",
+      "credential_env": null
+    }
   },
   "models": [
     {
       "id": "claude-opus-5-5",
+      "upstream_id": "claude-opus-5-5",
       "provider": "anthropic",
-      "display_name": "Claude Opus 5.5 — Claude Pro",
+      "display_name": "Claude Opus 5.5 — Claude",
       "visible": true,
-      "reasoning": { "default": "high", "supported": ["low", "medium", "high", "xhigh", "max"] },
-      "tools": { "shell": true, "computer_use": true, "web_search": false, "connected_apps": false },
+      "reasoning": {
+        "default": "high",
+        "supported": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "tools": {
+        "shell": true,
+        "computer_use": true,
+        "web_search": false,
+        "connected_apps": false
+      },
       "subagents": true
     },
     {
       "id": "k3.1-pro",
+      "upstream_id": "k3.1-pro",
       "provider": "kimi",
       "display_name": "Kimi K3.1 Pro — Kimi Membership",
       "visible": true,
-      "reasoning": { "default": "max", "supported": ["low", "high", "max"] },
-      "tools": { "shell": true, "computer_use": true, "web_search": false, "connected_apps": false },
+      "reasoning": {
+        "default": "max",
+        "supported": [
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      "tools": {
+        "shell": true,
+        "computer_use": true,
+        "web_search": false,
+        "connected_apps": false
+      },
       "subagents": true
+    },
+    {
+      "id": "local-llama",
+      "upstream_id": "llama3.2:3b",
+      "provider": "local",
+      "display_name": "Llama 3.2 — Local Ollama",
+      "visible": true,
+      "reasoning": {
+        "default": "medium",
+        "supported": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "tools": {
+        "shell": true,
+        "computer_use": true,
+        "web_search": false,
+        "connected_apps": false
+      },
+      "subagents": true,
+      "local": {
+        "endpoint": "http://127.0.0.1:11434/v1",
+        "protocol": "openai_chat",
+        "credential_env": null
+      }
     }
   ]
 }

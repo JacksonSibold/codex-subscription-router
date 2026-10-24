@@ -45,6 +45,8 @@ node_modules/
 dist/
 .dev-codex/
 artifacts/
+release/
+CONTEXT.md
 
 # Editors and operating systems
 .vscode/
