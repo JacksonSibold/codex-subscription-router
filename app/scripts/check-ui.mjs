@@ -122,7 +122,7 @@ try {
   if (!chrome) throw new Error('Chrome or Edge is required for the rendered UI check');
   for (const page of ['overview', 'models', 'connections', 'usage', 'capabilities']) {
     const screenshot = resolve(artifacts, `relay-${page}.png`);
-    const args = ['--headless=new', '--disable-gpu', '--hide-scrollbars', '--window-size=1440,1100', `--screenshot=${screenshot}`, '--virtual-time-budget=4000', `http://127.0.0.1:7100/#${page}`];
+    const args = ['--headless=new', '--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--hide-scrollbars', '--window-size=1440,1100', `--screenshot=${screenshot}`, '--virtual-time-budget=4000', `http://127.0.0.1:7100/#${page}`];
     const result = spawnSync(chrome, args, { stdio: 'inherit', timeout: 45000 });
     if (result.status !== 0 || !existsSync(screenshot)) throw new Error(`Headless browser render failed for ${page}`);
   }
