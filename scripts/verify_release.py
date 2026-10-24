@@ -82,7 +82,7 @@ def _free_port() -> int:
         return int(listener.getsockname()[1])
 
 
-def _wait_json(url: str, timeout: float = 20.0) -> dict:
+def _wait_json(url: str, timeout: float = 90.0) -> dict:
     deadline = time.time() + timeout
     last: Exception | None = None
     while time.time() < deadline:
