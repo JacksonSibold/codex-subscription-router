@@ -40,6 +40,12 @@ mixed-models.json
 *.tmp-*
 ~$*
 
+# Management app and isolated development state
+node_modules/
+dist/
+.dev-codex/
+artifacts/
+
 # Editors and operating systems
 .vscode/
 .idea/
