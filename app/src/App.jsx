@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { findSelectableDefault, isSelectableDefault } from './model-defaults.js';
 import {
   Activity, ArrowDown, ArrowUp, BookOpen, Bot, Box, Check, ChevronDown, ChevronRight,
   CircleGauge, Cloud, Code2, Copy, Cpu, Download, ExternalLink, Eye, EyeOff,
@@ -557,7 +558,20 @@ export default function App() {
   }
   useEffect(() => { reload(); }, []);
   useEffect(() => { window.history.replaceState(null, '', `#${page}`); }, [page]);
-  function updateSettings(next) { setSettings(next); setDirty(true); setData(current => ({ ...current, settings: next })); }
+  function updateSettings(next) {
+    if (!isSelectableDefault(next)) {
+      const replacement = findSelectableDefault(next);
+      if (!replacement) {
+        notify('Keep at least one visible model on an enabled provider.', 'error');
+        return;
+      }
+      next.runtime.default_model = replacement.id;
+      notify(`Default model switched to ${replacement.display_name} so the picker always has a valid selection.`);
+    }
+    setSettings(next);
+    setDirty(true);
+    setData(current => ({ ...current, settings: next }));
+  }
   async function save(apply = false) {
     setBusy(apply ? 'apply' : 'save');
     try {

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.2 — 2026-10-24
+
+- Fixed model-picker saves failing with `runtime.default_model: default model must be visible and use an enabled provider` after hiding or removing the current default route, or disabling its provider.
+- The interface now automatically selects the next visible route on an enabled provider, tells the user which default was selected, and rejects the final hide/disable action when no valid replacement exists.
+- Added a focused pre-build regression test covering hidden defaults, disabled providers, and no-replacement behavior.
+
 ## 1.0.1 — 2026-10-24
 
 - Added live provider catalogs to **Add model** for OpenAI, Claude, Kimi, and OpenCode, with every active account/cache entry, deprecated OpenCode filtering, duplicate removal, cross-provider search, a refresh control, five-minute caching, and stale/fallback status instead of an empty or unstable menu.
