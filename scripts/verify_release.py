@@ -42,6 +42,19 @@ def _archive_details(archive: Path) -> tuple[str, str, str]:
     raise ValueError(f"Unrecognized release archive name: {archive.name}")
 
 
+def _assert_catalog_ready(catalog: dict, label: str, expected_count: int = 11) -> None:
+    models = catalog.get("models")
+    if not isinstance(models, list) or len(models) != expected_count:
+        raise RuntimeError(f"{label} did not contain all {expected_count} routes")
+    for item in models:
+        if not isinstance(item, dict) or not str(item.get("slug") or "").strip():
+            raise RuntimeError(f"{label} contains a route without a slug")
+        if not (item.get("base_instructions") or item.get("model_messages")):
+            raise RuntimeError(
+                f"{label} route {item['slug']!r} is missing Codex instruction metadata"
+            )
+
+
 def _safe_target(base: Path, name: str) -> Path:
     target = (base / name).resolve()
     try:
@@ -167,8 +180,7 @@ def _verify_installer(package: Path, workspace: Path, version: str) -> None:
                 raise RuntimeError(f"Installer did not preserve executable mode for {launcher}")
 
     catalog = json.loads((home / "mixed-models.json").read_text(encoding="utf-8"))
-    if len(catalog.get("models", [])) != 11:
-        raise RuntimeError("Installer did not generate all eleven default model routes")
+    _assert_catalog_ready(catalog, "Installed catalog")
     config = tomllib.loads((home / "config.toml").read_text(encoding="utf-8"))
     if config.get("custom_marker") != "preserve-me" or config.get("model_provider") != "mixed":
         raise RuntimeError("Installer did not preserve and configure Codex safely")
@@ -262,8 +274,9 @@ def verify(archive: Path) -> None:
             )
             with LOOPBACK_OPENER.open(preview_request, timeout=10) as response:
                 preview = json.load(response)
-            if len(preview.get("models", [])) != 11:
-                raise RuntimeError("Packaged catalog preview did not include all default routes")
+            _assert_catalog_ready(
+                {"models": preview.get("included", [])}, "Packaged catalog preview"
+            )
 
             router_env = _environment(home)
             router_env["CODEX_ROUTER_PORT"] = str(router_port)
@@ -272,8 +285,7 @@ def verify(archive: Path) -> None:
             if health.get("relay_version") != version or health.get("models") != 11:
                 raise RuntimeError(f"Packaged router health is incomplete: {health}")
             catalog = json.loads((home / "mixed-models.json").read_text(encoding="utf-8"))
-            if len(catalog.get("models", [])) != 11:
-                raise RuntimeError("Packaged router did not generate all default catalog routes")
+            _assert_catalog_ready(catalog, "Packaged router catalog")
         finally:
             if router is not None:
                 _stop(router)

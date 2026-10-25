@@ -2,7 +2,7 @@
 
 Relay is a local, cross-platform router that puts OpenAI, OpenCode Go, Claude plans, Kimi Code, and local OpenAI-compatible models behind one Codex model picker. Each request stays on its own provider lane, with its own credential and protocol adapter.
 
-> **Project status:** Relay 1.0.0 is the current release for Windows, Linux, and macOS. The desktop archives are unsigned portable bundles and require Python 3.11 or newer. Signed/notarized native installers, a dedicated uninstaller, and automatic transactional rollback remain post-1.0 work.
+> **Project status:** Relay 1.0.1 is the current release for Windows, Linux, and macOS. The desktop archives are unsigned portable bundles and require Python 3.11 or newer. Signed/notarized native installers, a dedicated uninstaller, and automatic transactional rollback remain post-1.0 work.
 
 Relay is an independent project, not an OpenAI, Anthropic, Kimi, or OpenCode product. Provider eligibility, billing rules, model identifiers, and API behavior remain controlled by each provider.
 
@@ -29,11 +29,11 @@ Relay is an independent project, not an OpenAI, Anthropic, Kimi, or OpenCode pro
 
 The archives contain a static production UI, Python router, installer, launchers, examples, and open-source model catalog. They do not contain provider credentials, OAuth tokens, logs, local settings, generated catalogs, usage databases, or build dependencies.
 
-Download the 1.0.0 archive for your OS from [GitHub Releases](https://github.com/JacksonSibold/codex-subscription-router/releases/latest):
+Download the 1.0.1 archive for your OS from [GitHub Releases](https://github.com/JacksonSibold/codex-subscription-router/releases/latest):
 
-- `relay-1.0.0-windows.zip`
-- `relay-1.0.0-linux.tar.gz`
-- `relay-1.0.0-macos.tar.gz`
+- `relay-1.0.1-windows.zip`
+- `relay-1.0.1-linux.tar.gz`
+- `relay-1.0.1-macos.tar.gz`
 - `SHA256SUMS.txt`
 
 These are portable archives, not signed `.exe`, `.msi`, `.dmg`, or package-manager installers.
@@ -201,7 +201,7 @@ Build local release archives:
 python scripts/package_release.py --platform windows
 python scripts/package_release.py --platform linux
 python scripts/package_release.py --platform macos
-python scripts/verify_release.py release/relay-1.0.0-windows.zip
+python scripts/verify_release.py release/relay-1.0.1-windows.zip
 ```
 The package script defaults to the repository `VERSION` file and rejects a tag/version mismatch. `scripts/verify_release.py` extracts an archive into an isolated directory, checks launcher modes and forbidden runtime files, starts the packaged manager and router, and verifies the UI, API, catalog, version, and usage inventory. It also runs the shipped installer against a temporary Codex home, confirms configuration preservation, and launches the installed manager layout.
 
@@ -243,7 +243,7 @@ tests/                       Python regression, routing, OAuth, local, usage, pa
 
 ## Release verification
 
-Relay 1.0.0 is released only after all of these checks pass:
+Relay 1.0.1 is released only after all of these checks pass:
 
 - 60+ Python regression tests, source validation, the production UI build, and rendered UI checks.
 - Native CI and an isolated packaged-manager/router plus installer smoke test on each of Windows, Linux, and macOS.

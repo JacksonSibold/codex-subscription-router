@@ -45,7 +45,7 @@ class ManagerTests(unittest.TestCase):
                     self.assertNotIn("refresh", serialized.lower())
                     self.assertNotIn("access_token", serialized.lower())
                     self.assertEqual(len(state["settings"]["models"]), 11)
-                    self.assertEqual(state["version"], "1.0.0")
+                    self.assertEqual(state["version"], manager.version.__version__)
                     self.assertGreaterEqual(len(state["usage"]["accounts"]), 5)
                     request = urllib.request.Request(base + "/api/settings", data=b"{}", method="POST")
                     with self.assertRaises(urllib.error.HTTPError) as caught:

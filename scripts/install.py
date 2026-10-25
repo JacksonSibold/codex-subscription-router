@@ -30,7 +30,7 @@ def _set_toml_key(section: str, key: str, value: str) -> str:
     pattern = re.compile(rf"(?m)^\s*{re.escape(key)}\s*=.*$")
     line = f"{key} = {value}"
     if pattern.search(section):
-        return pattern.sub(line, section, count=1)
+        return pattern.sub(lambda _match: line, section, count=1)
     return section.rstrip() + ("\n" if section.strip() else "") + line + "\n"
 
 

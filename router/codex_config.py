@@ -15,7 +15,7 @@ def _set_key(header: str, key: str, value: str) -> str:
     pattern = re.compile(rf"(?m)^\s*{re.escape(key)}\s*=.*$")
     line = f"{key} = {value}"
     if pattern.search(header):
-        return pattern.sub(line, header, count=1)
+        return pattern.sub(lambda _match: line, header, count=1)
     return header.rstrip() + ("\n" if header.strip() else "") + line + "\n"
 
 

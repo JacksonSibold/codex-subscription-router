@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.1 — 2026-10-24
+
+- Fixed Windows Codex configuration updates so backslashes in `model_catalog_json` are written literally and the resulting TOML re-parses successfully.
+- Fixed generated and custom Relay catalog entries so every non-OpenAI route carries `base_instructions`, uses direct tool mode, and avoids Responses-lite parsing. This prevents Codex from rejecting the mixed catalog at startup.
+- Expanded release verification so an archive fails if any generated catalog entry lacks Codex instruction metadata.
+- Re-verified the installed Windows build with a live Codex request through the default Relay route.
+
 ## 1.0.0 — 2026-10-24
 
 - Promoted Relay to the 1.0 release line with one version source shared by Python, the manager API, the UI build, package metadata, archives, and release validation.

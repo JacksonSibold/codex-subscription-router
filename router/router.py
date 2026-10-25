@@ -112,7 +112,14 @@ def _read_json(path, fallback):
         return fallback
 
 
+BASE_INSTRUCTIONS = (
+    "You are Codex, an AI coding assistant. Help the user with software development tasks in their "
+    "workspace. Follow system and repository instructions, use available tools when needed, and be "
+    "clear about what you changed and what you verified."
+)
+
 GENERIC_CATALOG_MODEL = {
+    "base_instructions": BASE_INSTRUCTIONS,
     "description": "Model routed through Relay",
     "default_reasoning_level": "medium",
     "supported_reasoning_levels": [],
@@ -201,7 +208,7 @@ def build_catalog(document=None, output_path=None):
         item = _catalog_base(provider, upstream_id, cache, go)
         if provider != "openai":
             item.update({"supported_in_api": True, "input_modalities": ["text", "image"],
-                         "supports_reasoning_effort_updates": True, "supports_search_tool": False})
+                         "supports_reasoning_effort_updates": True, "supports_search_tool": False, "tool_mode": "direct", "use_responses_lite": False})
             if provider == "anthropic":
                 item.update({"context_window": 200000, "max_context_window": 1000000})
             elif provider == "local":

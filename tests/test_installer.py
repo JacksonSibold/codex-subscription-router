@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import sys
 import tempfile
 import tomllib
@@ -28,6 +29,13 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(parsed["model_catalog_json"], str(Path(directory) / "mixed-models.json"))
             self.assertTrue(parsed["agents"]["enabled"])
             self.assertTrue(list(Path(directory).glob("config.toml.backup-*")))
+
+    def test_windows_catalog_path_remains_valid_toml(self):
+        # Exercise a pre-existing single-quoted Windows path without depending on the host OS.
+        original = r"model_catalog_json = 'C:\Old\mixed-models.json'" + "\n"
+        expected = r"C:\New Folder\mixed-models.json"
+        result = install._set_toml_key(original, "model_catalog_json", json.dumps(expected))
+        self.assertEqual(tomllib.loads(result)["model_catalog_json"], expected)
 
     def test_default_model_uses_its_own_reasoning_default(self):
         with tempfile.TemporaryDirectory() as directory:

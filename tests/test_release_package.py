@@ -62,6 +62,14 @@ class ReleasePackageTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "does not match VERSION"):
                 package_release.package(root, "windows", "1.2.3", Path(directory) / "release")
 
+    def test_catalog_verification_requires_codex_instruction_metadata(self):
+        valid = {"models": [{"slug": "relay-test", "base_instructions": "You are Codex."}]}
+        verify_release._assert_catalog_ready(valid, "test catalog", expected_count=1)
+        with self.assertRaisesRegex(RuntimeError, "missing Codex instruction metadata"):
+            verify_release._assert_catalog_ready(
+                {"models": [{"slug": "relay-test"}]}, "test catalog", expected_count=1
+            )
+
     def test_release_verifier_uses_the_archive_package_folder(self):
         cases = {
             "relay-1.0.0-windows.zip": ("windows", "1.0.0", "relay-1.0.0-windows"),

@@ -116,8 +116,11 @@ class RouterTests(unittest.TestCase):
             built = {item["slug"]: item for item in json.loads(output.read_text(encoding="utf-8"))["models"]}
             self.assertEqual(set(built), {route["id"] for route in routes})
             self.assertTrue(all(item["multi_agent_version"] == "v2" for item in built.values()))
-            self.assertEqual(built["custom-opencode"]["use_responses_lite"], False)
-            self.assertEqual(built["custom-opencode"]["tool_mode"], "direct")
+            for item in built.values():
+                self.assertTrue(item.get("base_instructions") or item.get("model_messages"), item["slug"])
+            for slug in ("custom-opencode", "custom-claude", "custom-kimi", "custom-local"):
+                self.assertEqual(built[slug]["use_responses_lite"], False)
+                self.assertEqual(built[slug]["tool_mode"], "direct")
             self.assertEqual(built["custom-local"]["shell_type"], "shell_command")
 
     def test_catalog_excludes_hidden_and_disabled_routes_but_disables_ineligible_parents(self):
