@@ -167,8 +167,42 @@ function ClaudeConnect({ state, reload, notify }) {
   </div>;
 }
 
+function CodexLinkCard({ codex, reload, notify, setPage }) {
+  const [busy, setBusy] = useState(false);
+  const linked = Boolean(codex?.linked);
+  async function link() {
+    setBusy(true);
+    try {
+      const result = await api('/api/codex/link', {});
+      notify(result.message || 'Codex is linked to Relay.');
+      await reload();
+    } catch (error) { notify(error.message, 'error'); }
+    finally { setBusy(false); }
+  }
+  const status = linked ? 'Linked' : codex?.live_apply === false ? 'Preview only' : 'Not linked';
+  return <section className={`panel codex-link-card ${linked ? 'is-linked' : ''}`}>
+    <div className="codex-link-main">
+      <div className="codex-link-heading"><span className="metric-icon purple"><TerminalSquare size={20}/></span><div><span className="eyebrow">CODEX ON THIS PC</span><h3>{linked ? 'Your local Codex uses Relay' : 'Connect your Codex model picker'}</h3></div><span className={`link-status ${linked ? 'linked' : ''}`}><i/>{status}</span></div>
+      <p>Link this machine's Codex installation to Relay. Your OpenAI sign-in stays in Codex, while every configured Claude, Kimi, OpenCode, and local route becomes available from the same picker.</p>
+      <div className="codex-config-path"><span>Codex config</span><code>{codex?.config_location || 'Codex configuration path unavailable'}</code></div>
+      {codex?.error && <div className="link-error">{codex.error}</div>}
+      <div className="codex-link-actions">
+        <button className="button primary" disabled={busy || codex?.live_apply === false} onClick={link}>{busy ? <LoaderCircle className="spin" size={16}/> : <Link2 size={16}/>}{linked ? 'Repair Codex link' : 'Link Codex on this PC'}</button>
+        <button className="button secondary" onClick={() => setPage('models')}><Layers3 size={16}/>Review picker models</button>
+      </div>
+      <div className="safe-note"><ShieldCheck size={13}/>Only Relay's model defaults, catalog path, and <code>mixed</code> provider are updated. Unrelated Codex projects, plugins, providers, and credentials are preserved with a timestamped backup. Open a new Codex chat after linking.</div>
+    </div>
+    <div className="codex-link-facts">
+      <div><span>Provider</span><strong>{codex?.model_provider || 'mixed'}</strong></div>
+      <div><span>Relay endpoint</span><strong>127.0.0.1:{codex?.router_port || 18765}</strong></div>
+      <div><span>Catalog</span><strong>{codex?.catalog_exists ? 'Ready' : 'Created when linked'}</strong></div>
+      <div><span>Codex CLI</span><strong>{codex?.codex_installed ? 'Detected' : 'Not on PATH'}</strong></div>
+    </div>
+  </section>;
+}
+
 function Connections({ data, updateSettings, reload, notify, setPage }) {
-  const { settings, providers } = data;
+  const { settings, providers, codex_link: codexLink } = data;
   async function action(provider, kind) {
     try {
       const result = await api(kind === 'login' ? '/api/login' : '/api/open-docs', { provider });
@@ -188,6 +222,7 @@ function Connections({ data, updateSettings, reload, notify, setPage }) {
   const localModels = settings.models.filter(model => model.provider === 'local');
   return <div className="page">
     <div className="notice"><ShieldCheck size={18}/><span>Relay detects whether credentials exist, but never displays them. “Credential found” is not a billed API test.</span></div>
+    <CodexLinkCard codex={codexLink} reload={reload} notify={notify} setPage={setPage}/>
     <div className="connection-grid">{Object.entries(PROVIDERS).map(([id, meta]) => {
       const state = providers[id] || {};
       const enabled = settings.providers[id].enabled;
@@ -314,23 +349,50 @@ function LocalModelModal({ data, onAdd, close, notify }) {
   </form></div>;
 }
 
-function AddModelMenu({ data, onAvailable, onCustom, onLocal }) {
-  const available = data.available_models || [];
+function AddModelMenu({ data, onAvailable, onCustom, onLocal, notify }) {
+  const [available, setAvailable] = useState(data.available_models || []);
+  const [providerCatalogs, setProviderCatalogs] = useState(data.provider_catalogs || {});
+  const [query, setQuery] = useState('');
+  const [busy, setBusy] = useState(false);
   const configured = (provider, upstreamId) => data.settings.models.some(model =>
     model.provider === provider && (model.upstream_id || model.id) === upstreamId);
+  async function refresh(force) {
+    setBusy(true);
+    try {
+      const snapshot = await api(`/api/provider-models${force ? '?refresh=1' : ''}`);
+      const merged = new Map((data.available_models || []).map(model => [`${model.provider}:${model.id}`, model]));
+      Object.entries(snapshot.providers || {}).forEach(([provider, catalog]) => {
+        (catalog.models || []).forEach(model => merged.set(`${provider}:${model.id}`, { ...model, provider }));
+      });
+      setAvailable([...merged.values()]);
+      setProviderCatalogs(snapshot);
+      const failed = Object.entries(snapshot.providers || {}).filter(([, catalog]) => catalog.error).map(([provider]) => PROVIDERS[provider]?.name || provider);
+      if (failed.length) notify(`Some catalogs used cached entries: ${failed.join(', ')}.`, 'error');
+    } catch (error) {
+      notify(error.message, 'error');
+    } finally {
+      setBusy(false);
+    }
+  }
+  useEffect(() => { refresh(true); }, []);
+  const needle = query.trim().toLowerCase();
+  const visibleGroups = Object.entries(PROVIDERS).filter(([id]) => id !== 'local').map(([id, meta]) => ({
+    id, meta,
+    models: available.filter(model => model.provider === id && (!needle || `${model.name} ${model.id}`.toLowerCase().includes(needle))),
+  }));
   return <div className="add-model-menu panel">
-    <div className="add-menu-head"><div><span className="eyebrow">PROVIDER CATALOGS</span><strong>Choose a model</strong></div><span>{available.length} listed</span></div>
-    <div className="add-menu-scroll">{Object.entries(PROVIDERS).filter(([id]) => id !== 'local').map(([id, meta]) => {
-      const models = available.filter(model => model.provider === id);
-      return <section key={id}><div className="add-group-label"><ProviderMark provider={id} size="small"/><strong>{meta.name}</strong><span>{models.length}</span></div>{models.map(model => {
+    <div className="add-menu-head"><div><span className="eyebrow">PROVIDER CATALOGS</span><strong>Choose a model</strong></div><div className="catalog-head-actions"><span>{available.length} listed</span><button type="button" className="icon-button" title="Refresh provider catalogs" disabled={busy} onClick={() => refresh(true)}><RefreshCw className={busy ? 'spin' : ''} size={15}/></button></div></div>
+    <label className="add-menu-search"><Search size={14}/><input autoFocus placeholder="Search every connected provider…" value={query} onChange={event => setQuery(event.target.value)}/>{query && <button type="button" onClick={() => setQuery('')}><X size={13}/></button>}</label>
+    <div className="add-menu-scroll">{visibleGroups.map(({ id, meta, models }) => {
+      const catalog = providerCatalogs.providers?.[id] || {};
+      return <section key={id}><div className="add-group-label" title={catalog.source || ''}><ProviderMark provider={id} size="small"/><strong>{meta.name}</strong><span>{models.length}{needle && catalog.count !== models.length ? ` / ${catalog.count}` : ''}</span></div>{models.map(model => {
         const added = configured(id, model.id);
         return <button key={`${id}-${model.id}`} disabled={added} className={added ? 'catalog-added' : ''} onClick={() => onAvailable(id, model)}><span>{model.name}{added && <em>In picker</em>}</span><code>{model.id}</code></button>;
-      })}{!models.length && <p>No catalog entries for this provider. Use a custom upstream ID.</p>}</section>;
+      })}{!models.length && <p>{needle ? 'No models match this search.' : 'No catalog entries for this provider. Use a custom upstream ID.'}</p>}</section>;
     })}</div>
-    <div className="add-menu-footer"><button onClick={onLocal}><HardDrive size={15}/><span><strong>Local model</strong><small>Discover Ollama, LM Studio, or compatible server</small></span><ChevronRight size={14}/></button><button onClick={onCustom}><Plus size={15}/><span><strong>Custom provider model</strong><small>Enter any upstream model ID</small></span><ChevronRight size={14}/></button></div>
+    <div className="add-menu-footer"><button onClick={onLocal}><HardDrive size={15}/><span><strong>Local model</strong><small>Discover Ollama, LM Studio, or compatible server</small></span><ChevronRight size={14}/></button><button onClick={onCustom}><Plus size={15}/><span><strong>Custom provider model</strong><small>Enter any upstream ID, even before it appears in a catalog</small></span><ChevronRight size={14}/></button></div>
   </div>;
 }
-
 
 function ModelsPage({ data, updateSettings, notify }) {
   const { settings } = data;
@@ -377,7 +439,7 @@ function ModelsPage({ data, updateSettings, notify }) {
     catch (error) { notify(error.message, 'error'); }
   }
   return <div className="page models-page">
-    <div className="model-toolbar"><label className="search-box"><Search size={16}/><input placeholder="Find a model…" value={query} onChange={e => setQuery(e.target.value)}/></label><div className="select-wrap filter-select"><select value={filter} onChange={e => setFilter(e.target.value)}><option value="all">All providers</option>{Object.entries(PROVIDERS).map(([id, meta]) => <option value={id} key={id}>{meta.name}</option>)}</select><ChevronRight size={14}/></div><button className="button secondary" onClick={makePreview}><Eye size={16}/>Preview</button><div className="add-model-wrap"><button className="button primary" onClick={() => setAddMenu(value => !value)}><Plus size={16}/>Add model<ChevronDown size={14}/></button>{addMenu && <><button className="add-menu-scrim" aria-label="Close add model menu" onClick={() => setAddMenu(false)}/><AddModelMenu data={data} onAvailable={(provider, model) => addModel(newModel(provider, model.id, model.name, settings))} onCustom={() => { setAddMenu(false); setCustomOpen(true); }} onLocal={() => { setAddMenu(false); setLocalOpen(true); }}/></>}</div></div>
+    <div className="model-toolbar"><label className="search-box"><Search size={16}/><input placeholder="Find a model…" value={query} onChange={e => setQuery(e.target.value)}/></label><div className="select-wrap filter-select"><select value={filter} onChange={e => setFilter(e.target.value)}><option value="all">All providers</option>{Object.entries(PROVIDERS).map(([id, meta]) => <option value={id} key={id}>{meta.name}</option>)}</select><ChevronRight size={14}/></div><button className="button secondary" onClick={makePreview}><Eye size={16}/>Preview</button><div className="add-model-wrap"><button className="button primary" onClick={() => setAddMenu(value => !value)}><Plus size={16}/>Add model<ChevronDown size={14}/></button>{addMenu && <><button className="add-menu-scrim" aria-label="Close add model menu" onClick={() => setAddMenu(false)}/><AddModelMenu data={data} notify={notify} onAvailable={(provider, model) => addModel(newModel(provider, model.id, model.name, settings))} onCustom={() => { setAddMenu(false); setCustomOpen(true); }} onLocal={() => { setAddMenu(false); setLocalOpen(true); }}/></>}</div></div>
     <div className="models-layout"><section className="panel models-list"><div className="list-header"><span>{settings.models.filter(m => m.visible).length} shown in Codex</span><span>Click a row to edit · drag to reorder</span></div>
       {models.map(model => <div key={model.id} className={`model-row ${selected === model.id ? 'selected' : ''} ${!model.visible ? 'hidden-model' : ''}`} draggable onDragStart={() => { dragIndex.current = model.index; }} onDragOver={e => e.preventDefault()} onDrop={() => move(dragIndex.current, model.index)} onClick={() => openEditor(model.id)}>
         <GripVertical className="grip" size={17}/><ProviderMark provider={model.provider}/><div className="model-row-copy"><strong>{model.display_name}</strong><span>{PROVIDERS[model.provider]?.name} · {model.upstream_id || model.id}</span><div className="model-tags"><span>{model.reasoning.default || 'no thinking'}</span>{model.tools.computer_use && <span><Monitor size={11}/>Computer Use</span>}{model.subagents && <span><Bot size={11}/>Cross-provider</span>}{model.provider === 'local' && <span><HardDrive size={11}/>{model.local?.protocol === 'openai_responses' ? 'Responses' : 'Chat'}</span>}</div></div>

@@ -64,6 +64,8 @@
 - [x] Add a credential-free local usage ledger and UI.
 - [x] Add live Codex, Claude, and Kimi subscription allowance cards with reset times.
 - [x] Populate Add model with OpenAI, Claude, Kimi, and OpenCode provider catalogs.
+- [x] Refresh and search every active connected-account catalog, with cached/fallback behavior for provider outages.
+- [x] Link the Codex installation on this PC from Connections while preserving unrelated configuration.
 - [x] Apply the blue Relay interface theme.
 - [x] Enable any eligible model as a cross-provider child-agent target.
 - [x] Ship Windows, Linux, and macOS release archives for `1.0.0`.

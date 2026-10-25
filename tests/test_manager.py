@@ -195,6 +195,102 @@ class ManagerTests(unittest.TestCase):
         self.assertIn("kimi", providers)
         self.assertEqual(len({(model["provider"], model["id"]) for model in models}), len(models))
 
+    def test_codex_link_status_requires_the_exact_relay_provider_and_catalog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            catalog = home / "mixed-models.json"
+            catalog.write_text('{"models": []}', encoding="utf-8")
+            config = home / "config.toml"
+
+            def write_config(provider: str, base_url: str, catalog_path: Path) -> None:
+                config.write_text(
+                    f'model = "claude-opus-5-5"\nmodel_provider = "{provider}"\n'
+                    f'model_catalog_json = {json.dumps(str(catalog_path))}\n\n'
+                    f'[model_providers.mixed]\nbase_url = "{base_url}"\nwire_api = "responses"\n',
+                    encoding="utf-8",
+                )
+
+            with patch.object(manager.router, "CODEX_HOME", str(home)), \
+                 patch.object(manager.shutil, "which", return_value="codex"):
+                write_config("mixed", "http://127.0.0.1:18765", catalog)
+                self.assertTrue(manager.codex_link_status()["linked"])
+                write_config("openai", "http://127.0.0.1:18765", catalog)
+                self.assertFalse(manager.codex_link_status()["linked"])
+                write_config("mixed", "http://127.0.0.1:19999", catalog)
+                self.assertFalse(manager.codex_link_status()["linked"])
+                write_config("mixed", "http://127.0.0.1:18765", home / "other-models.json")
+                status = manager.codex_link_status()
+                self.assertFalse(status["linked"])
+                self.assertFalse(status["catalog_matches"])
+                self.assertNotIn("access_token", json.dumps(status).lower())
+
+    def test_link_codex_preserves_configuration_and_reports_router_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            config = home / "config.toml"
+            config.write_text(
+                'model = "old"\nmodel_provider = "existing"\n\n'
+                '[model_providers.existing]\nbase_url = "http://127.0.0.1:9000"\n\n'
+                '[projects."example"]\ntrust_level = "trusted"\n\n'
+                '[[plugins]]\nname = "keep-this-plugin"\n',
+                encoding="utf-8",
+            )
+            with patch.object(manager, "SETTINGS_PATH", home / "router-settings.json"), \
+                 patch.object(manager.router, "CODEX_HOME", str(home)), \
+                 patch.dict(os.environ, {"CODEX_ROUTER_DEV": ""}), \
+                 patch.object(manager.urllib.request, "urlopen", side_effect=manager.urllib.error.URLError("offline")):
+                result = manager.link_codex()
+                status = manager.codex_link_status()
+            parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+            self.assertTrue(result["linked"])
+            self.assertFalse(result["router_reloaded"])
+            self.assertTrue(status["linked"])
+            self.assertEqual(parsed["model_provider"], "mixed")
+            self.assertEqual(parsed["model_providers"]["existing"]["base_url"], "http://127.0.0.1:9000")
+            self.assertEqual(parsed["projects"]["example"]["trust_level"], "trusted")
+            self.assertEqual(parsed["plugins"][0]["name"], "keep-this-plugin")
+            self.assertTrue((home / "mixed-models.json").is_file())
+            self.assertEqual(len(list(home.glob("config.toml.backup-*"))), 1)
+            self.assertNotIn("access_token", json.dumps(result).lower())
+            self.assertNotIn("refresh_token", json.dumps(result).lower())
+
+    def test_link_codex_is_disabled_in_isolated_development_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with patch.object(manager.router, "CODEX_HOME", str(home)), \
+                 patch.dict(os.environ, {"CODEX_ROUTER_DEV": "1"}):
+                with self.assertRaisesRegex(ValueError, "isolated preview"):
+                    manager.link_codex()
+            self.assertFalse((home / "config.toml").exists())
+
+    def test_provider_models_api_returns_catalogs_without_credentials(self):
+        snapshot = {
+            "checked_at": "2030-01-01T00:00:00Z",
+            "total": 4,
+            "providers": {
+                provider: {"models": [{"id": f"{provider}-model", "name": f"{provider.title()} Model"}],
+                           "count": 1, "source": "live account catalog", "error": None, "stale": False}
+                for provider in ("openai", "anthropic", "kimi", "opencode")
+            },
+        }
+        with patch.object(manager.provider_catalog, "collect", return_value=snapshot) as collect:
+            server = ThreadingHTTPServer(("127.0.0.1", 0), manager.Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{server.server_port}/api/provider-models?refresh=1"
+                ) as response:
+                    result = json.load(response)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+        collect.assert_called_once()
+        self.assertEqual(result["total"], 4)
+        self.assertNotIn("access_token", json.dumps(result).lower())
+        self.assertNotIn("refresh_token", json.dumps(result).lower())
+
     def test_relay_oauth_status_takes_precedence_over_opencode_fallback(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(manager.anthropic_oauth, "credential_status", return_value={

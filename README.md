@@ -13,7 +13,8 @@ Relay is an independent project, not an OpenAI, Anthropic, Kimi, or OpenCode pro
 - Adds Ollama, LM Studio, and custom loopback OpenAI-compatible models.
 - Discovers local models from `/v1/models`.
 - Tracks provider-reported subscription allowances plus routed token usage across every configured account and local endpoint, including connected lanes with zero recorded requests.
-- Supports model editing, stable picker route IDs, editable upstream model IDs, and a grouped add-model dropdown populated with OpenAI, Claude, Kimi, and OpenCode provider catalogs. Custom model IDs are cataloged even when a provider cache has not seen them yet.
+- Supports model editing, stable picker route IDs, editable upstream model IDs, and a searchable add-model dropdown populated live from the connected OpenAI, Claude, Kimi, and OpenCode accounts. Active OpenCode entries are included, deprecated entries are excluded, and every provider list has cached/fallback behavior if its live catalog is temporarily unavailable. Custom model IDs are cataloged even when a provider cache has not seen them yet.
+- Links this computer's Codex installation to Relay from **Connections → Codex on this PC**, with a preservation-focused configuration merge and timestamped backup.
 - Enables cross-provider subagents through the same catalog: any visible, enabled, subagent-eligible route can be used as a child from any provider lane.
 - Keeps credentials isolated by provider and never forwards a ChatGPT credential to a third-party or local endpoint.
 - Generates the Codex catalog from credential-free preferences, with atomic saves, backups, validation, and a guarded Apply flow.
@@ -82,8 +83,8 @@ A model must be visible, its provider enabled, and its subagent control enabled 
 ## Relay management app
 
 - **Overview:** provider readiness, picker inventory, usage, and router state.
-- **Connections:** Codex sign-in, Relay-owned Claude OAuth, Kimi/OpenCode key forms, and local endpoint summary.
-- **Model picker:** provider-populated add-model dropdown, click-to-edit rows, editable upstream IDs, show/hide, ordering, defaults, endpoint/protocol editing, and per-model policies.
+- **Connections:** one-click linking for Codex on this PC, Codex sign-in, Relay-owned Claude OAuth, Kimi/OpenCode key forms, and local endpoint summary.
+- **Model picker:** searchable live-provider add-model dropdown with refresh and cached-state handling, click-to-edit rows, editable upstream IDs, show/hide, ordering, defaults, endpoint/protocol editing, and per-model policies.
 - **Usage:** live Codex, Claude, and Kimi subscription allowances; connected accounts even before their first request; token totals; per-provider/account activity; daily chart; model distribution; and recent request status.
 - **Capabilities:** honest per-provider tool and delegation behavior.
 - **Diagnostics:** loopback health, sanitized logs, safe settings export, and local file locations.
@@ -146,6 +147,8 @@ The installer:
 - Does not restart Codex or a running router.
 
 Use `--codex-home <path>` for an isolated installation.
+
+After installing, you can also open **Connections → Codex on this PC → Link Codex on this PC**. This runs the same preservation-focused `mixed` provider and catalog merge on demand, creates a timestamped `config.toml` backup, and asks the running router to reload. Open a new Codex conversation to see picker changes; Codex itself is not restarted.
 
 ## Usage and allowances
 
@@ -232,6 +235,7 @@ router/
   credentials.py             Current-user credential storage
   settings.py                Versioned settings schema, migration, validation, backup
   codex_config.py            Preservation-focused Codex default updates
+  provider_catalog.py        Live OpenAI, Claude, Kimi, and active OpenCode model catalogs
   namespace_tools.py         Computer Use namespace bridge
 scripts/
   install.py                 Installer and Codex config merge
@@ -245,7 +249,7 @@ tests/                       Python regression, routing, OAuth, local, usage, pa
 
 Relay 1.0.1 is released only after all of these checks pass:
 
-- 60+ Python regression tests, source validation, the production UI build, and rendered UI checks.
+- 70+ Python regression tests, source validation, the production UI build, and rendered UI checks.
 - Native CI and an isolated packaged-manager/router plus installer smoke test on each of Windows, Linux, and macOS.
 - Tag/version consistency, archive allowlists, Unix executable modes, and SHA-256 checks.
 - A post-publication workflow that downloads the three published assets back from GitHub and verifies `SHA256SUMS.txt`.

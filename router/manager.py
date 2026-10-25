@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -27,6 +28,7 @@ import anthropic_oauth
 import codex_config
 import credentials
 import local_adapter
+import provider_catalog
 import router
 import settings
 import subscription_usage
@@ -178,6 +180,12 @@ def available_models() -> list[dict[str, str]]:
                           for model in models if isinstance(model.get("slug"), str))
         except (OSError, ValueError, KeyError, TypeError):
             continue
+    snapshot = provider_catalog.cached_snapshot()
+    if snapshot:
+        for provider, catalog in snapshot.get("providers", {}).items():
+            output.extend({
+                "id": model["id"], "provider": provider, "name": model["name"]
+            } for model in catalog.get("models", []) if isinstance(model, dict) and model.get("id"))
     unique: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for model in output:
@@ -307,6 +315,87 @@ def discover_local(endpoint: Any) -> list[dict[str, str]]:
     return local_adapter.discover(endpoint.strip())
 
 
+def codex_link_status() -> dict[str, Any]:
+    """Describe whether this machine's Codex config points at Relay, without secrets."""
+    home = Path(router.CODEX_HOME)
+    config_path = home / "config.toml"
+    catalog_path = home / "mixed-models.json"
+    result: dict[str, Any] = {
+        "linked": False,
+        "config_exists": config_path.is_file(),
+        "catalog_exists": catalog_path.is_file(),
+        "config_location": str(config_path),
+        "catalog_location": str(catalog_path),
+        "codex_installed": bool(shutil.which("codex")),
+        "router_port": router.PORT,
+        "live_apply": os.environ.get("CODEX_ROUTER_DEV") != "1",
+    }
+    try:
+        document = tomllib.loads(config_path.read_text(encoding="utf-8")) if config_path.is_file() else {}
+    except (OSError, ValueError) as exc:
+        result["error"] = f"Codex configuration could not be read: {type(exc).__name__}"
+        return result
+    provider = (document.get("model_providers") or {}).get("mixed") or {}
+    configured_catalog = document.get("model_catalog_json")
+    catalog_matches = False
+    if isinstance(configured_catalog, str) and configured_catalog:
+        try:
+            catalog_matches = Path(configured_catalog).expanduser().resolve() == catalog_path.resolve()
+        except OSError:
+            catalog_matches = False
+    expected_base = f"http://127.0.0.1:{router.PORT}"
+    result.update({
+        "model_provider": document.get("model_provider"),
+        "default_model": document.get("model"),
+        "catalog_matches": catalog_matches,
+        "provider_base_url": provider.get("base_url"),
+        "linked": bool(
+            document.get("model_provider") == "mixed"
+            and catalog_matches
+            and provider.get("base_url") == expected_base
+            and catalog_path.is_file()
+        ),
+    })
+    return result
+
+
+def link_codex() -> dict[str, Any]:
+    """Generate the catalog and bind this machine's Codex installation to Relay."""
+    if os.environ.get("CODEX_ROUTER_DEV") == "1":
+        raise ValueError("The isolated preview cannot modify the live Codex configuration")
+    document = settings.load(SETTINGS_PATH)
+    selected = next(model for model in document["models"] if model["id"] == document["runtime"]["default_model"])
+    home = Path(router.CODEX_HOME)
+    home.mkdir(parents=True, exist_ok=True)
+    catalog_path = home / "mixed-models.json"
+    with tempfile.TemporaryDirectory(prefix="codex-link-preview-") as directory:
+        router.build_catalog(document, str(Path(directory) / "mixed-models.json"))
+    router.build_catalog(document, str(catalog_path))
+    codex_config.configure_relay(
+        home / "config.toml", catalog_path, selected["id"], selected["reasoning"]["default"],
+        base_url=f"http://127.0.0.1:{router.PORT}",
+    )
+    reloaded = False
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{router.PORT}/__router_reload", data=b"{}", method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=4) as response:
+            reloaded = bool(json.load(response).get("ok"))
+    except (OSError, ValueError, urllib.error.URLError):
+        pass
+    return {
+        "linked": True,
+        "router_reloaded": reloaded,
+        "message": (
+            "This Codex installation is linked to Relay. Open a new Codex conversation to use the updated picker."
+            if reloaded else
+            "Codex is linked to Relay. Start the router to activate the new catalog."
+        ),
+    }
+
+
 def state() -> dict[str, Any]:
     document = settings.load(SETTINGS_PATH)
     providers = provider_state()
@@ -323,6 +412,8 @@ def state() -> dict[str, Any]:
         "router": router_health(),
         "catalog": [{"id": m.get("slug"), "name": m.get("display_name")} for m in catalog],
         "available_models": available_models(),
+        "provider_catalogs": provider_catalog.cached_snapshot() or {},
+        "codex_link": codex_link_status(),
         "settings_location": str(SETTINGS_PATH),
         "catalog_location": str(catalog_path),
         "usage_location": str(usage_path()),
@@ -423,6 +514,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, usage_dashboard(days))
             elif parsed.path == "/api/subscription-usage":
                 self.reply(200, subscription_usage.collect(router.CODEX_HOME))
+            elif parsed.path == "/api/provider-models":
+                query = urllib.parse.parse_qs(parsed.query)
+                force = (query.get("refresh") or ["0"])[0] in ("1", "true", "yes")
+                self.reply(200, provider_catalog.collect(Path(router.CODEX_HOME), force=force))
             elif parsed.path == "/api/diagnostics":
                 self.reply(200, {"router": router_health(), "log": redacted_log()})
             elif parsed.path.startswith("/api/"):
@@ -446,6 +541,8 @@ class Handler(BaseHTTPRequestHandler):
                     with output.open(encoding="utf-8") as handle:
                         catalog = json.load(handle)["models"]
                 self.reply(200, {"ok": True, "models": models, "included": catalog})
+            elif self.path == "/api/codex/link":
+                self.reply(200, link_codex())
             elif self.path == "/api/apply":
                 clean = settings.validate(body.get("settings"))
                 # Build once in a temporary location before replacing any preferences.

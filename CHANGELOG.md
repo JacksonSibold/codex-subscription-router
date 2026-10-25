@@ -2,6 +2,9 @@
 
 ## 1.0.1 — 2026-10-24
 
+- Added live provider catalogs to **Add model** for OpenAI, Claude, Kimi, and OpenCode, with every active account/cache entry, deprecated OpenCode filtering, duplicate removal, cross-provider search, a refresh control, five-minute caching, and stale/fallback status instead of an empty or unstable menu.
+- Added **Connections → Codex on this PC → Link Codex on this PC**. It generates the current Relay catalog, merges only Relay's Codex defaults and `mixed` provider settings, preserves unrelated projects/plugins/providers, creates a timestamped backup, and reloads the running router without restarting Codex.
+- Added sanitized provider-catalog error reporting and regression coverage for catalog parsing, fallback/stale behavior, Windows-safe configuration updates, preservation-focused Codex linking, exact link detection, and credential-free management responses.
 - Fixed Windows Codex configuration updates so backslashes in `model_catalog_json` are written literally and the resulting TOML re-parses successfully.
 - Fixed generated and custom Relay catalog entries so every non-OpenAI route carries `base_instructions`, uses direct tool mode, and avoids Responses-lite parsing. This prevents Codex from rejecting the mixed catalog at startup.
 - Expanded release verification so an archive fails if any generated catalog entry lacks Codex instruction metadata.

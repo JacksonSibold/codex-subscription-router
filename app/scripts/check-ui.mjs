@@ -39,10 +39,23 @@ try {
   if (!state.providers.local) throw new Error('Local provider was not exposed by the manager');
   if (typeof state.usage?.totals?.requests !== 'number') throw new Error('Usage dashboard was not exposed by the manager');
   if (!Array.isArray(state.usage?.accounts) || state.usage.accounts.length < 5) throw new Error('Usage account inventory was incomplete');
+  if (state.codex_link?.live_apply !== false) throw new Error('Codex linking was not disabled in isolated development mode');
   for (const provider of ['openai', 'anthropic', 'kimi']) {
     if (!state.available_models?.some(model => model.provider === provider)) {
       throw new Error(`Add-model catalog did not include ${provider}`);
     }
+  }
+  const providerModelsResponse = await fetch('http://127.0.0.1:7100/api/provider-models?refresh=1');
+  const providerModels = await providerModelsResponse.json();
+  if (!providerModelsResponse.ok) throw new Error(`Provider catalog API failed: ${JSON.stringify(providerModels)}`);
+  for (const provider of ['openai', 'anthropic', 'kimi', 'opencode']) {
+    if (!Array.isArray(providerModels.providers?.[provider]?.models)) {
+      throw new Error(`Provider catalog did not include ${provider}`);
+    }
+  }
+  const catalogJson = JSON.stringify(providerModels).toLowerCase();
+  if (catalogJson.includes('access_token') || catalogJson.includes('refresh_token')) {
+    throw new Error('Provider catalog response contained credential-shaped fields');
   }
   const preview = await fetch('http://127.0.0.1:7100/api/preview', {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Router-Manager': '1' }, body: JSON.stringify({ settings: state.settings }),
