@@ -427,7 +427,9 @@ def server_smoke(dev: bool) -> int:
     except Exception as exc:
         error_path = data_dir / "desktop-service-error.log"
         detail = error_path.read_text(encoding="utf-8", errors="replace") if error_path.is_file() else ""
-        raise RuntimeError(f"Desktop services failed: {exc}\n{detail}") from exc
+        router_log = Path(os.environ.get("CODEX_ROUTER_LOG") or data_dir / "router.log")
+        router_detail = router_log.read_text(encoding="utf-8", errors="replace")[-4000:] if router_log.is_file() else ""
+        raise RuntimeError(f"Desktop services failed: {exc}\n{detail}\n{router_detail}") from exc
     manager_port = os.environ["CODEX_ROUTER_MANAGER_PORT"]
     try:
         state = _json_url(f"http://127.0.0.1:{manager_port}/api/state", timeout=20)

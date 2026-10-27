@@ -677,15 +677,19 @@ class Handler(BaseHTTPRequestHandler):
             f"ns_tools={len(ns_map)} dropped_reasoning={dropped}{' ENCODED-BODY' if encoded else ''} {time.time() - started:.1f}s")
 
 def main():
+    log(f"router service starting; pid={os.getpid()} port={PORT}")
     try:
         namespace_tools.self_test()
+        log("namespace bridge self-test passed")
     except Exception as e:
         log(f"FATAL namespace bridge self-test failed, refusing to start: {e!r}")
         sys.exit(1)
+    log(f"binding router on {HOST}:{PORT}")
     try:
         server = ThreadingHTTPServer((HOST, PORT), Handler)
     except OSError:
         sys.exit(0)  # already running
+    log(f"router bound on {HOST}:{PORT}")
     if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > 2_000_000:
         os.replace(LOG_PATH, LOG_PATH + ".old")
     log(f"namespace bridge v{namespace_tools.VERSION} ok; listening on {HOST}:{PORT}; enabled models: {sorted(enabled_models())}")
