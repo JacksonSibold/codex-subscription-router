@@ -24,6 +24,7 @@ hiddenimports = [
     "codex_config",
     "error_explainer",
     "local_adapter",
+    "loopback_server",
     "namespace_tools",
     "provider_catalog",
     "subscription_usage",

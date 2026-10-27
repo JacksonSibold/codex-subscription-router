@@ -21,13 +21,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from typing import Any
 
 import anthropic_oauth
 import codex_config
 import credentials
 import local_adapter
+from loopback_server import LoopbackHTTPServer
 import provider_catalog
 import router
 import settings
@@ -737,7 +738,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    server = ThreadingHTTPServer(("127.0.0.1", MANAGER_PORT), Handler)
+    server = LoopbackHTTPServer(("127.0.0.1", MANAGER_PORT), Handler)
     threading.Thread(target=catalog_refresh_loop, name="relay-catalog-refresh", daemon=True).start()
     address = f"http://127.0.0.1:{MANAGER_PORT}"
     print(f"Router manager listening on {address}", flush=True)

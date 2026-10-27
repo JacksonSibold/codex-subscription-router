@@ -315,7 +315,8 @@ class DesktopController:
 
 
 def _start_control_server(controller: DesktopController) -> object | None:
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from http.server import BaseHTTPRequestHandler
+    from loopback_server import LoopbackHTTPServer
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -335,7 +336,7 @@ def _start_control_server(controller: DesktopController) -> object | None:
                 self.end_headers()
 
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", CONTROL_PORT), Handler)
+        server = LoopbackHTTPServer(("127.0.0.1", CONTROL_PORT), Handler)
     except OSError:
         return None
     threading.Thread(target=server.serve_forever, name="relay-desktop-control", daemon=True).start()

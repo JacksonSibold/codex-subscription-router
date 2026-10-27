@@ -19,7 +19,7 @@ import ssl
 import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlsplit
 
 import anthropic_adapter
@@ -27,6 +27,7 @@ import anthropic_oauth
 import credentials
 import error_explainer
 import local_adapter
+from loopback_server import LoopbackHTTPServer
 import namespace_tools
 import settings as router_settings
 import usage_store
@@ -686,7 +687,7 @@ def main():
         sys.exit(1)
     log(f"binding router on {HOST}:{PORT}")
     try:
-        server = ThreadingHTTPServer((HOST, PORT), Handler)
+        server = LoopbackHTTPServer((HOST, PORT), Handler)
     except OSError:
         sys.exit(0)  # already running
     log(f"router bound on {HOST}:{PORT}")
