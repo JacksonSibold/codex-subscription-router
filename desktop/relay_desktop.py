@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.request
 
@@ -89,7 +90,16 @@ def _service_thread(role: str) -> threading.Thread:
     else:
         import manager
         target = manager.main
-    thread = threading.Thread(target=target, name=f"relay-{role}", daemon=True)
+
+    def guarded():
+        try:
+            target()
+        except BaseException:
+            error_path = Path(os.environ["CODEX_ROUTER_DATA_DIR"]) / "desktop-service-error.log"
+            error_path.parent.mkdir(parents=True, exist_ok=True)
+            error_path.write_text(traceback.format_exc(), encoding="utf-8")
+
+    thread = threading.Thread(target=guarded, name=f"relay-{role}", daemon=True)
     thread.start()
     return thread
 
@@ -399,7 +409,12 @@ def server_smoke(dev: bool) -> int:
     os.environ["CODEX_ROUTER_CREDENTIALS"] = str(data_dir / "credentials.json")
     os.environ["OPENCODE_AUTH_PATH"] = str(data_dir / "opencode-auth.json")
     os.environ.pop("RELAY_ANTHROPIC_OAUTH", None)
-    owned = ensure_services()
+    try:
+        owned = ensure_services()
+    except Exception as exc:
+        error_path = data_dir / "desktop-service-error.log"
+        detail = error_path.read_text(encoding="utf-8", errors="replace") if error_path.is_file() else ""
+        raise RuntimeError(f"Desktop services failed: {exc}\n{detail}") from exc
     manager_port = os.environ["CODEX_ROUTER_MANAGER_PORT"]
     try:
         state = _json_url(f"http://127.0.0.1:{manager_port}/api/state", timeout=20)
