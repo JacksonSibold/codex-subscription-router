@@ -82,6 +82,17 @@ def _wait_json(url: str, timeout: float = 15.0) -> dict:
 
 
 def _service_thread(role: str) -> threading.Thread:
+    error_path = Path(os.environ["CODEX_ROUTER_DATA_DIR"]) / "desktop-service-error.log"
+
+    def service_log(message: str) -> None:
+        try:
+            error_path.parent.mkdir(parents=True, exist_ok=True)
+            with error_path.open("a", encoding="utf-8") as handle:
+                handle.write(f"{time.strftime('%H:%M:%S')} {role}: {message}\n")
+        except OSError:
+            pass
+
+    service_log("thread setup started")
     root = SOURCE_ROOT if not FROZEN else RESOURCE_ROOT
     sys.path.insert(0, str(root / "router"))
     if role == "router":
@@ -90,14 +101,16 @@ def _service_thread(role: str) -> threading.Thread:
     else:
         import manager
         target = manager.main
+    service_log("service target imported")
 
     def guarded():
+        service_log("service target entered")
         try:
             target()
         except BaseException:
-            error_path = Path(os.environ["CODEX_ROUTER_DATA_DIR"]) / "desktop-service-error.log"
-            error_path.parent.mkdir(parents=True, exist_ok=True)
-            error_path.write_text(traceback.format_exc(), encoding="utf-8")
+            service_log("service target crashed:\n" + traceback.format_exc())
+        else:
+            service_log("service target returned")
 
     thread = threading.Thread(target=guarded, name=f"relay-{role}", daemon=True)
     thread.start()
