@@ -28,6 +28,8 @@
 - [x] Usage dashboard with account, model, daily, and recent-request views.
 - [x] Sanitized logs and diagnostics with secret redaction.
 - [x] Responsive production UI served directly by the local manager.
+- [x] Native desktop companion with adjacent Codex window placement and tray/menu-bar access.
+- [x] Start hidden with the desktop session and open when Codex starts.
 
 ## Phase 4 — Non-disruptive apply and lifecycle management
 
@@ -48,6 +50,7 @@
 - [x] Add a repeatable installer with backups and preservation-focused Codex configuration merging.
 - [x] Add Windows, Linux, and macOS CI for unit tests, source validation, production build, and rendered UI.
 - [x] Add allowlisted release archives, portable launchers, checksums, and tag-triggered GitHub publishing.
+- [x] Build and smoke-test native desktop executables on Windows, Linux, and macOS.
 - [x] Add protected current-user credential storage for Linux and macOS.
 - [ ] Add a dedicated uninstaller with preview and rollback support.
 - [x] Formalize release versioning and changelog practice for `1.0.0`.
@@ -65,7 +68,9 @@
 - [x] Add live Codex, Claude, and Kimi subscription allowance cards with reset times.
 - [x] Populate Add model with OpenAI, Claude, Kimi, and OpenCode provider catalogs.
 - [x] Refresh and search every active connected-account catalog, with cached/fallback behavior for provider outages.
+- [x] Persist catalog snapshots, refresh them in the background, and mark newly launched provider models.
 - [x] Link the Codex installation on this PC from Connections while preserving unrelated configuration.
+- [x] Explain Codex-link breakage and provider/model failures with actionable repair steps.
 - [x] Apply the blue Relay interface theme.
 - [x] Enable any eligible model as a cross-provider child-agent target.
 - [x] Ship Windows, Linux, and macOS release archives for `1.0.0`.

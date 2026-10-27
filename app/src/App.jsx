@@ -187,6 +187,7 @@ function CodexLinkCard({ codex, reload, notify, setPage }) {
       <p>Link this machine's Codex installation to Relay. Your OpenAI sign-in stays in Codex, while every configured Claude, Kimi, OpenCode, and local route becomes available from the same picker.</p>
       <div className="codex-config-path"><span>Codex config</span><code>{codex?.config_location || 'Codex configuration path unavailable'}</code></div>
       {codex?.error && <div className="link-error">{codex.error}</div>}
+      {!linked && codex?.reason && <div className="link-error"><strong>{codex.reason}</strong>{codex.action && <span>{codex.action}</span>}</div>}
       <div className="codex-link-actions">
         <button className="button primary" disabled={busy || codex?.live_apply === false} onClick={link}>{busy ? <LoaderCircle className="spin" size={16}/> : <Link2 size={16}/>}{linked ? 'Repair Codex link' : 'Link Codex on this PC'}</button>
         <button className="button secondary" onClick={() => setPage('models')}><Layers3 size={16}/>Review picker models</button>
@@ -353,6 +354,7 @@ function LocalModelModal({ data, onAdd, close, notify }) {
 function AddModelMenu({ data, onAvailable, onCustom, onLocal, notify }) {
   const [available, setAvailable] = useState(data.available_models || []);
   const [providerCatalogs, setProviderCatalogs] = useState(data.provider_catalogs || {});
+  const [newModels, setNewModels] = useState(data.provider_catalog_status?.new_models || []);
   const [query, setQuery] = useState('');
   const [busy, setBusy] = useState(false);
   const configured = (provider, upstreamId) => data.settings.models.some(model =>
@@ -367,6 +369,7 @@ function AddModelMenu({ data, onAvailable, onCustom, onLocal, notify }) {
       });
       setAvailable([...merged.values()]);
       setProviderCatalogs(snapshot);
+      setNewModels(snapshot.new_models || []);
       const failed = Object.entries(snapshot.providers || {}).filter(([, catalog]) => catalog.error).map(([provider]) => PROVIDERS[provider]?.name || provider);
       if (failed.length) notify(`Some catalogs used cached entries: ${failed.join(', ')}.`, 'error');
     } catch (error) {
@@ -377,18 +380,20 @@ function AddModelMenu({ data, onAvailable, onCustom, onLocal, notify }) {
   }
   useEffect(() => { refresh(true); }, []);
   const needle = query.trim().toLowerCase();
+  const newKeys = new Set(newModels.map(model => `${model.provider}:${model.id}`));
   const visibleGroups = Object.entries(PROVIDERS).filter(([id]) => id !== 'local').map(([id, meta]) => ({
     id, meta,
     models: available.filter(model => model.provider === id && (!needle || `${model.name} ${model.id}`.toLowerCase().includes(needle))),
   }));
   return <div className="add-model-menu panel">
-    <div className="add-menu-head"><div><span className="eyebrow">PROVIDER CATALOGS</span><strong>Choose a model</strong></div><div className="catalog-head-actions"><span>{available.length} listed</span><button type="button" className="icon-button" title="Refresh provider catalogs" disabled={busy} onClick={() => refresh(true)}><RefreshCw className={busy ? 'spin' : ''} size={15}/></button></div></div>
+    <div className="add-menu-head"><div><span className="eyebrow">PROVIDER CATALOGS</span><strong>Choose a model</strong></div><div className="catalog-head-actions"><span>{newModels.length ? `${newModels.length} new · ` : ''}{available.length} listed</span><button type="button" className="icon-button" title="Refresh provider catalogs" disabled={busy} onClick={() => refresh(true)}><RefreshCw className={busy ? 'spin' : ''} size={15}/></button></div></div>
     <label className="add-menu-search"><Search size={14}/><input autoFocus placeholder="Search every connected provider…" value={query} onChange={event => setQuery(event.target.value)}/>{query && <button type="button" onClick={() => setQuery('')}><X size={13}/></button>}</label>
     <div className="add-menu-scroll">{visibleGroups.map(({ id, meta, models }) => {
       const catalog = providerCatalogs.providers?.[id] || {};
       return <section key={id}><div className="add-group-label" title={catalog.source || ''}><ProviderMark provider={id} size="small"/><strong>{meta.name}</strong><span>{models.length}{needle && catalog.count !== models.length ? ` / ${catalog.count}` : ''}</span></div>{models.map(model => {
         const added = configured(id, model.id);
-        return <button key={`${id}-${model.id}`} disabled={added} className={added ? 'catalog-added' : ''} onClick={() => onAvailable(id, model)}><span>{model.name}{added && <em>In picker</em>}</span><code>{model.id}</code></button>;
+        const isNew = newKeys.has(`${id}:${model.id}`);
+        return <button key={`${id}-${model.id}`} disabled={added} className={added ? 'catalog-added' : ''} onClick={() => onAvailable(id, model)}><span>{model.name}{added ? <em>In picker</em> : isNew ? <em>New</em> : null}</span><code>{model.id}</code></button>;
       })}{!models.length && <p>{needle ? 'No models match this search.' : 'No catalog entries for this provider. Use a custom upstream ID.'}</p>}</section>;
     })}</div>
     <div className="add-menu-footer"><button onClick={onLocal}><HardDrive size={15}/><span><strong>Local model</strong><small>Discover Ollama, LM Studio, or compatible server</small></span><ChevronRight size={14}/></button><button onClick={onCustom}><Plus size={15}/><span><strong>Custom provider model</strong><small>Enter any upstream ID, even before it appears in a catalog</small></span><ChevronRight size={14}/></button></div>
@@ -440,7 +445,7 @@ function ModelsPage({ data, updateSettings, notify }) {
     catch (error) { notify(error.message, 'error'); }
   }
   return <div className="page models-page">
-    <div className="model-toolbar"><label className="search-box"><Search size={16}/><input placeholder="Find a model…" value={query} onChange={e => setQuery(e.target.value)}/></label><div className="select-wrap filter-select"><select value={filter} onChange={e => setFilter(e.target.value)}><option value="all">All providers</option>{Object.entries(PROVIDERS).map(([id, meta]) => <option value={id} key={id}>{meta.name}</option>)}</select><ChevronRight size={14}/></div><button className="button secondary" onClick={makePreview}><Eye size={16}/>Preview</button><div className="add-model-wrap"><button className="button primary" onClick={() => setAddMenu(value => !value)}><Plus size={16}/>Add model<ChevronDown size={14}/></button>{addMenu && <><button className="add-menu-scrim" aria-label="Close add model menu" onClick={() => setAddMenu(false)}/><AddModelMenu data={data} notify={notify} onAvailable={(provider, model) => addModel(newModel(provider, model.id, model.name, settings))} onCustom={() => { setAddMenu(false); setCustomOpen(true); }} onLocal={() => { setAddMenu(false); setLocalOpen(true); }}/></>}</div></div>
+    <div className="model-toolbar"><label className="search-box"><Search size={16}/><input placeholder="Find a model…" value={query} onChange={e => setQuery(e.target.value)}/></label><div className="select-wrap filter-select"><select value={filter} onChange={e => setFilter(e.target.value)}><option value="all">All providers</option>{Object.entries(PROVIDERS).map(([id, meta]) => <option value={id} key={id}>{meta.name}</option>)}</select><ChevronRight size={14}/></div><button className="button secondary" onClick={makePreview}><Eye size={16}/>Preview</button><div className="add-model-wrap"><button className="button primary" onClick={() => setAddMenu(value => !value)}><Plus size={16}/>Add model{data.provider_catalog_status?.new_count > 0 && <span className="nav-count">{data.provider_catalog_status.new_count}</span>}<ChevronDown size={14}/></button>{addMenu && <><button className="add-menu-scrim" aria-label="Close add model menu" onClick={() => setAddMenu(false)}/><AddModelMenu data={data} notify={notify} onAvailable={(provider, model) => addModel(newModel(provider, model.id, model.name, settings))} onCustom={() => { setAddMenu(false); setCustomOpen(true); }} onLocal={() => { setAddMenu(false); setLocalOpen(true); }}/></>}</div></div>
     <div className="models-layout"><section className="panel models-list"><div className="list-header"><span>{settings.models.filter(m => m.visible).length} shown in Codex</span><span>Click a row to edit · drag to reorder</span></div>
       {models.map(model => <div key={model.id} className={`model-row ${selected === model.id ? 'selected' : ''} ${!model.visible ? 'hidden-model' : ''}`} draggable onDragStart={() => { dragIndex.current = model.index; }} onDragOver={e => e.preventDefault()} onDrop={() => move(dragIndex.current, model.index)} onClick={() => openEditor(model.id)}>
         <GripVertical className="grip" size={17}/><ProviderMark provider={model.provider}/><div className="model-row-copy"><strong>{model.display_name}</strong><span>{PROVIDERS[model.provider]?.name} · {model.upstream_id || model.id}</span><div className="model-tags"><span>{model.reasoning.default || 'no thinking'}</span>{model.tools.computer_use && <span><Monitor size={11}/>Computer Use</span>}{model.subagents && <span><Bot size={11}/>Cross-provider</span>}{model.provider === 'local' && <span><HardDrive size={11}/>{model.local?.protocol === 'openai_responses' ? 'Responses' : 'Chat'}</span>}</div></div>
@@ -533,8 +538,17 @@ function Diagnostics({ data, notify }) {
   }
   useEffect(() => { refresh(); }, []);
   const health = diagnostics?.router || data.router;
+  const routerCurrent = !health?.relay_version || health.relay_version === data.version;
+  const routeHealth = diagnostics?.route_health || data.route_health;
+  const catalog = diagnostics?.provider_catalog || data.provider_catalog_status;
+  const issues = [...(routeHealth?.errors || []), ...(routeHealth?.warnings || [])];
   return <div className="page"><div className="diagnostic-grid"><section className="panel health-card"><div className="section-heading"><div><span className="eyebrow">LOCAL SERVICE</span><h3>Router health</h3></div><button className="icon-button" onClick={refresh}><RefreshCw size={17} className={loading ? 'spin' : ''}/></button></div><div className={`health-orb ${health.reachable ? 'online' : ''}`}><Activity size={28}/></div><h2>{health.reachable ? 'Router is responding' : 'Router is on standby'}</h2><p>{health.reachable ? `${health.models ?? '—'} enabled routes · namespace bridge v${health.namespace_bridge ?? '—'}` : health.detail || 'Start the updated router when you are ready.'}</p><span className="endpoint"><span className="live-dot"/>127.0.0.1 only</span></section>
     <section className="panel paths-card"><div className="section-heading"><div><span className="eyebrow">LOCAL FILES</span><h3>Configuration locations</h3></div><FileJson size={19}/></div><label>Preferences<code>{data.settings_location}</code></label><label>Generated Codex catalog<code>{data.catalog_location}</code></label><label>Usage ledger<code>{data.usage_location}</code></label><div className="safe-note">Settings contain no API keys or OAuth tokens. Backups are created before every saved change.</div><button className="button secondary" onClick={() => { const blob = new Blob([JSON.stringify(data.settings, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'router-settings-export.json'; a.click(); URL.revokeObjectURL(url); }}><Download size={15}/>Export safe preferences</button></section></div>
+    <section className={`panel route-issues-panel ${routeHealth?.status || 'ready'}`}><div className="section-heading"><div><span className="eyebrow">ROUTE CHECKS</span><h3>{issues.length ? `${issues.length} model issue${issues.length === 1 ? '' : 's'} need attention` : 'Every configured route looks healthy'}</h3></div><span className="local-badge">{routeHealth?.routes_checked ?? data.settings.models.length} CHECKED</span></div>
+      <div className="catalog-freshness"><span>Provider catalogs: <strong>{catalog?.stale ? 'refreshing' : 'current'}</strong>{catalog?.checked_at ? ` · ${catalog.checked_at}` : ''}</span>{catalog?.new_count > 0 && <span><strong>{catalog.new_count} new model{catalog.new_count === 1 ? '' : 's'}</strong> available in Add model</span>}</div>
+      {issues.length ? <div className="route-issue-list">{issues.map((issue, index) => <div className={`route-issue ${routeHealth?.errors?.includes(issue) ? 'error' : 'warning'}`} key={`${issue.route_id}-${issue.code}-${index}`}><ProviderMark provider={issue.provider} size="small"/><div><strong>{issue.message}</strong><p>{issue.action}</p><code>{issue.code} · {issue.route_id}</code></div></div>)}</div> : <div className="healthy-routes"><Check size={20}/><div><strong>Credentials and cataloged upstream IDs match</strong><span>Custom IDs are allowed and will be checked again after the next provider catalog refresh.</span></div></div>}
+    </section>
+    {!routerCurrent && <div className="notice route-version-notice"><RefreshCw size={17}/><span><strong>Router update pending.</strong> Relay {data.version} is installed, while the running router is {health.relay_version}. Your active session was not restarted; the new router loads automatically the next time Codex and Router start normally.</span></div>}
     <section className="panel logs-panel"><div className="section-heading"><div><span className="eyebrow">SANITIZED ACTIVITY</span><h3>Recent router events</h3></div><span className="local-badge">REDACTED</span></div><div className="log-view">{diagnostics?.log?.length ? diagnostics.log.map((line, i) => <code key={i}>{line}</code>) : <div className="empty-state"><TerminalSquare size={23}/><p>No local router log is available in this development environment.</p></div>}</div></section>
   </div>;
 }

@@ -2,7 +2,7 @@
 
 Relay is a local, cross-platform router that puts OpenAI, OpenCode Go, Claude plans, Kimi Code, and local OpenAI-compatible models behind one Codex model picker. Each request stays on its own provider lane, with its own credential and protocol adapter.
 
-> **Project status:** Relay 1.0.2 is the current release for Windows, Linux, and macOS. The desktop archives are unsigned portable bundles and require Python 3.11 or newer. Signed/notarized native installers, a dedicated uninstaller, and automatic transactional rollback remain post-1.0 work.
+> **Project status:** Relay 1.1.0 is the current release for Windows, Linux, and macOS. It ships a native desktop companion that opens beside Codex and waits for Codex at startup. The binaries are unsigned portable builds, so SmartScreen and Gatekeeper may warn. Signed installers, a dedicated uninstaller, and automatic transactional rollback remain future work.
 
 Relay is an independent project, not an OpenAI, Anthropic, Kimi, or OpenCode product. Provider eligibility, billing rules, model identifiers, and API behavior remain controlled by each provider.
 
@@ -19,25 +19,29 @@ Relay is an independent project, not an OpenAI, Anthropic, Kimi, or OpenCode pro
 - Keeps credentials isolated by provider and never forwards a ChatGPT credential to a third-party or local endpoint.
 - Generates the Codex catalog from credential-free preferences, with atomic saves, backups, validation, and a guarded Apply flow.
 - Avoids restarting Codex during ordinary save, apply, and catalog reload operations.
+- Starts without terminal commands in a native Relay window, positions beside Codex on Windows, and can start hidden with the desktop session so it appears when Codex opens.
+- Refreshes provider catalogs on launch and every 15 minutes, persists their non-secret model lists, and marks newly discovered models in **Add model**.
+- Explains failed model requests in plain language for authentication, quota, model-ID, context-size, tool-compatibility, provider-outage, and local-endpoint failures.
 
 ## Platforms and release archives
 
-| Platform | Release | API-key and Relay OAuth storage | Launchers |
+| Platform | Desktop release | API-key and Relay OAuth storage | Required runtime |
 | --- | --- | --- | --- |
-| Windows 10/11 | `.zip` | Current-user environment registry | `.cmd` |
-| macOS 13+ | `.tar.gz` | Owner-only file under `~/Library/Application Support/Relay` | `.sh`, `.command` |
-| Linux | `.tar.gz` | Owner-only file under `$XDG_CONFIG_HOME/relay` or `~/.config/relay` | `.sh` |
+| Windows 10/11 | `.zip` with `Relay.exe` | Current-user environment registry | Bundled Python and WebView2 |
+| macOS 13+ | `.tar.gz` with `Relay.app` | Owner-only Relay credential file | Bundled Python and system WebKit |
+| Linux | `.tar.gz` with `Relay/Relay` | Owner-only Relay credential file | Bundled Python and Qt WebEngine |
 
-The archives contain a static production UI, Python router, installer, launchers, examples, and open-source model catalog. They do not contain provider credentials, OAuth tokens, logs, local settings, generated catalogs, usage databases, or build dependencies.
+The desktop archives contain the native window, static production UI, Python router, generation bridge, and required GUI runtime. They do not contain provider credentials, OAuth tokens, logs, local settings, generated catalogs, or usage databases. A separate portable backend archive remains available for headless operation and scripted installs.
 
-Download the 1.0.1 archive for your OS from [GitHub Releases](https://github.com/JacksonSibold/codex-subscription-router/releases/latest):
+Download the 1.1.0 build for your OS from [GitHub Releases](https://github.com/JacksonSibold/codex-subscription-router/releases/latest):
 
-- `relay-1.0.2-windows.zip`
-- `relay-1.0.2-linux.tar.gz`
-- `relay-1.0.2-macos.tar.gz`
+- `relay-1.1.0-windows-desktop.zip`
+- `relay-1.1.0-linux-desktop.tar.gz`
+- `relay-1.1.0-macos-desktop.tar.gz`
+- Portable backend archives and launchers for all three platforms
 - `SHA256SUMS.txt`
 
-These are portable archives, not signed `.exe`, `.msi`, `.dmg`, or package-manager installers.
+The desktop builds are portable application bundles, not signed `.msi`, `.pkg`, or `.dmg` installers. On first launch they register a per-user startup entry; Relay stays hidden until Codex is observed, then opens its native window beside it.
 
 ## Providers
 
@@ -87,7 +91,7 @@ A model must be visible, its provider enabled, and its subagent control enabled 
 - **Model picker:** searchable live-provider add-model dropdown with refresh and cached-state handling, click-to-edit rows, editable upstream IDs, show/hide, ordering, defaults, endpoint/protocol editing, and per-model policies.
 - **Usage:** live Codex, Claude, and Kimi subscription allowances; connected accounts even before their first request; token totals; per-provider/account activity; daily chart; model distribution; and recent request status.
 - **Capabilities:** honest per-provider tool and delegation behavior.
-- **Diagnostics:** loopback health, sanitized logs, safe settings export, and local file locations.
+- **Diagnostics:** loopback health, credential and upstream-ID checks for every configured route, provider-catalog freshness and new-model counts, explained router failures, sanitized logs, safe settings export, and local file locations.
 
 Credential-found status means a local credential or endpoint was found. It is not a billed inference test.
 
@@ -99,26 +103,42 @@ Credential-found status means a local credential or endpoint was found. It is no
 - **Local:** function tools and freeform custom tools are translated to Chat Completions tool calls, then translated back into Responses events. Computer Use namespaces use the same bridge. Compatibility depends on the local model's tool-calling quality.
 - **Thinking:** the picker exposes only the levels configured for each model. Claude uses Anthropic effort output; Responses lanes receive Responses reasoning; Chat Completions receives `reasoning_effort` when the request supplies one.
 
-## Run without installing into Codex
+## Desktop launch
 
-Extract a release archive and start the router and manager:
+1. Extract the desktop archive.
+2. Windows: double-click `Relay\Relay.exe`. macOS: open `Relay.app`. Linux: run `Relay/Relay`.
+3. On first launch, Relay registers its per-user startup entry, starts the local services, and opens beside Codex.
+4. Use **Connections → Codex on this PC** if Codex's model picker is not yet linked.
 
-Windows:
+No terminal window or browser tab is required. Closing Relay hides it; use the Relay tray/menu-bar icon to show it again or quit. The startup helper waits quietly for Codex and does not restart, attach debuggers to, or modify an active Codex process.
 
-```powershell
+### If Relay does not appear
+
+1. Double-click `Relay.exe` (Windows), open `Relay.app` (macOS), or run `Relay/Relay` (Linux) once.
+2. Check the tray/menu-bar area for the blue Relay icon.
+3. Open **Diagnostics** and confirm the router is reachable and the Codex link says **Linked**.
+4. Do not run `npm`, `vite`, `manager.py`, or internal child-process arguments for normal desktop use.
+
+Only the desktop executable is needed after extraction. The backend archive and `.cmd`/`.sh` files exist for headless installations and troubleshooting.
+
+The older command-line launch path remains available for diagnostics and headless development. It does not change Codex configuration or restart Codex.
+
+Windows portable backend:
+
+```text
 .\Start Router.cmd
 .\Start Relay.cmd
 ```
 
-macOS or Linux:
+macOS or Linux portable backend:
 
-```bash
+```text
 chmod +x *.sh *.command
 ./Start Router.sh
 ./Start Relay.sh
 ```
 
-Relay listens only on loopback. The router uses `127.0.0.1:18765`; the management app uses `127.0.0.1:18766`. These launch files do not change Codex configuration or restart Codex.
+Relay listens only on loopback. The router uses `127.0.0.1:18765`; the native companion's manager uses `127.0.0.1:18767`, keeping it isolated from an older browser preview on `18766`.
 
 ## Install into Codex
 
@@ -139,6 +159,7 @@ python3 scripts/install.py --configure-codex
 The installer:
 
 - Copies router Python files and the production UI to `<codex-home>/model-router`.
+- Copies the native desktop app when a desktop build is present.
 - Copies launchers, the OpenCode catalog, and generates `mixed-models.json`.
 - Preserves existing Relay preferences and creates defaults only when absent.
 - Creates timestamped backups before replacing installed files or changing `config.toml`.
@@ -187,26 +208,29 @@ The development preview is `http://localhost:7100/`. Development mode uses only 
 
 Run all checks:
 
-```bash
+```text
 python -m unittest discover -s tests -v
 python scripts/validate.py
 git diff --check
 cd app
 npm run build
 npm run test:ui
+cd ..
+python scripts/package_desktop.py
 ```
 
-The GitHub Actions matrix repeats Python tests, source validation, the production build, rendered UI checks, and an isolated package launch test on Windows, Linux, and macOS. A separate Python 3.11 compatibility job validates the minimum documented runtime.
+The GitHub Actions matrix repeats Python tests, source validation, the production build, rendered UI checks, native desktop packaging and server smoke tests, and an isolated backend-package launch test on Windows, Linux, and macOS. A separate Python 3.11 compatibility job validates the minimum backend runtime.
 
 Build local release archives:
 
-```bash
+```text
 python scripts/package_release.py --platform windows
 python scripts/package_release.py --platform linux
 python scripts/package_release.py --platform macos
-python scripts/verify_release.py release/relay-1.0.2-windows.zip
+python scripts/package_desktop.py
+python scripts/verify_release.py release/relay-1.1.0-windows.zip
 ```
-The package script defaults to the repository `VERSION` file and rejects a tag/version mismatch. `scripts/verify_release.py` extracts an archive into an isolated directory, checks launcher modes and forbidden runtime files, starts the packaged manager and router, and verifies the UI, API, catalog, version, and usage inventory. It also runs the shipped installer against a temporary Codex home, confirms configuration preservation, and launches the installed manager layout.
+The package scripts default to the repository `VERSION` file and reject a tag/version mismatch. `scripts/verify_release.py` extracts an archive into an isolated directory, checks launcher modes and forbidden runtime files, starts the packaged manager and router, and verifies the UI, API, catalog, version, and usage inventory. `scripts/package_desktop.py` uses PyInstaller, then launches the built executable with isolated settings and free ports to verify its manager, router, static UI, and credential isolation. It never reads the live credential store during the smoke test.
 
 ## Apply and rollback behavior
 
@@ -222,6 +246,7 @@ The package script defaults to the repository `VERSION` file and rejects a tag/v
 ```text
 app/                         React/Vite Relay UI, development isolation, rendered checks
 catalog/                     OpenCode Go picker definitions
+desktop/                     Native pywebview companion, startup registration, tray, and desktop tests
 docs/                        Roadmap
 examples/                    Credential-free Codex and settings examples
 router/
@@ -236,10 +261,12 @@ router/
   settings.py                Versioned settings schema, migration, validation, backup
   codex_config.py            Preservation-focused Codex default updates
   provider_catalog.py        Live OpenAI, Claude, Kimi, and active OpenCode model catalogs
+  error_explainer.py         Provider failures translated into actionable categories
   namespace_tools.py         Computer Use namespace bridge
 scripts/
   install.py                 Installer and Codex config merge
   package_release.py         Allowlisted Windows/Linux/macOS packaging
+  package_desktop.py         Native desktop build, isolated smoke test, and archive
   validate.py                Syntax, examples, path, and credential scan
 tests/                       Python regression, routing, OAuth, local, usage, package tests
 .github/workflows/           Three-OS CI and tag-triggered release publication
@@ -247,14 +274,14 @@ tests/                       Python regression, routing, OAuth, local, usage, pa
 
 ## Release verification
 
-Relay 1.0.2 is released only after all of these checks pass:
+Relay 1.1.0 is released only after all of these checks pass:
 
-- 70+ Python regression tests, source validation, the production UI build, and rendered UI checks.
-- Native CI and an isolated packaged-manager/router plus installer smoke test on each of Windows, Linux, and macOS.
+- 90+ Python regression tests, source validation, the production UI build, and rendered UI checks.
+- Native CI, a packaged desktop server smoke test, and an isolated backend manager/router plus installer smoke test on each of Windows, Linux, and macOS.
 - Tag/version consistency, archive allowlists, Unix executable modes, and SHA-256 checks.
-- A post-publication workflow that downloads the three published assets back from GitHub and verifies `SHA256SUMS.txt`.
+- A post-publication workflow that downloads every published asset back from GitHub and verifies `SHA256SUMS.txt`.
 
-The artifacts are portable archives. They are not signed `.exe`, `.msi`, `.pkg`, `.dmg`, or package-manager installers.
+The desktop artifacts contain native executables but are not signed or notarized installers.
 
 ## Credentials and privacy
 
@@ -273,7 +300,8 @@ The artifacts are portable archives. They are not signed `.exe`, `.msi`, `.pkg`,
 - Claude OAuth is a user-mediated browser code flow built on the provider's public client flow; it is not a guarantee of subscription eligibility.
 - Connected-app namespaces and hosted web search remain OpenAI-only.
 - Local model quality, tool calling, context size, and image support vary by server/model.
-- Archives are not signed or notarized native installers.
+- Desktop executables are not code-signed or notarized; SmartScreen/Gatekeeper warnings are expected until signing certificates are available.
+- Linux desktop builds bundle Qt WebEngine and still require a graphical Wayland or X11 session.
 - Automatic rollback and a dedicated uninstaller are not implemented.
 
 See [CHANGELOG.md](CHANGELOG.md) and [docs/ROADMAP.md](docs/ROADMAP.md).

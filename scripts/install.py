@@ -107,6 +107,12 @@ def install(codex_home: Path, configure: bool) -> None:
     if (target / "app").exists():
         shutil.rmtree(target / "app")
     shutil.copytree(static, target / "app")
+    desktop_source = ROOT / "desktop" / "dist" / ("Relay.app" if sys.platform == "darwin" else "Relay")
+    if desktop_source.is_dir():
+        desktop_target = target / ("desktop/Relay.app" if sys.platform == "darwin" else "desktop")
+        if desktop_target.exists():
+            shutil.rmtree(desktop_target)
+        shutil.copytree(desktop_source, desktop_target)
     for name in ("Start Relay.cmd", "Start Router.cmd", "Start Relay.sh", "Start Router.sh", "Start Relay.command", "Start Router.command"):
         source = ROOT / name
         if source.is_file():
@@ -132,6 +138,11 @@ def install(codex_home: Path, configure: bool) -> None:
     print("Codex and the running router were not restarted. Start the new router when convenient.")
     launcher = "Start Relay.cmd" if os.name == "nt" else "Start Relay.sh"
     print(f"Management app: {codex_home / launcher}")
+    if desktop_source.is_dir():
+        desktop_app = desktop_target / "Contents" / "MacOS" / "Relay" if sys.platform == "darwin" else desktop_target / (
+            "Relay.exe" if os.name == "nt" else "Relay"
+        )
+        print(f"Desktop app: {desktop_app}")
 
 
 def main() -> None:

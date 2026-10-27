@@ -24,6 +24,7 @@ router-settings.json.backup-*
 *.sqlite
 *.sqlite-*
 reasoning-origins.json
+provider-catalog-cache.json
 router.log
 router.log.old
 
@@ -44,6 +45,10 @@ mixed-models.json
 node_modules/
 dist/
 .dev-codex/
+desktop/build/
+desktop/dist/
+desktop/relay.ico
+desktop/relay.png
 artifacts/
 release/
 CONTEXT.md

@@ -42,7 +42,7 @@ class ManagerTests(unittest.TestCase):
                     with urllib.request.urlopen(base + "/api/state") as response:
                         state = json.load(response)
                     serialized = json.dumps(state)
-                    self.assertNotIn("refresh", serialized.lower())
+                    self.assertNotIn("refresh_token", serialized.lower())
                     self.assertNotIn("access_token", serialized.lower())
                     self.assertEqual(len(state["settings"]["models"]), 11)
                     self.assertEqual(state["version"], manager.version.__version__)
@@ -223,6 +223,62 @@ class ManagerTests(unittest.TestCase):
                 self.assertFalse(status["linked"])
                 self.assertFalse(status["catalog_matches"])
                 self.assertNotIn("access_token", json.dumps(status).lower())
+
+    def test_codex_link_status_explains_a_replaced_provider(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            catalog = home / "mixed-models.json"
+            catalog.write_text('{"models": [{"slug": "gpt-6.1-sol"}]}', encoding="utf-8")
+            (home / "config.toml").write_text(
+                'model = "gpt-6.1-sol"\nmodel_provider = "openai"\n'
+                f"model_catalog_json = {json.dumps(str(catalog))}\n",
+                encoding="utf-8",
+            )
+            with patch.object(manager.router, "CODEX_HOME", str(home)), \
+                 patch.object(manager.shutil, "which", return_value="codex"):
+                status = manager.codex_link_status()
+        self.assertFalse(status["linked"])
+        self.assertIn("openai provider", status["reason"])
+        self.assertIn("without resetting", status["action"])
+        self.assertEqual(status["catalog_models"], 1)
+
+    def test_route_health_surfaces_missing_credentials_and_unknown_models(self):
+        document = manager.settings.default_settings()
+        providers = {
+            provider: {"status": "not_configured", "detail": "not connected"}
+            for provider in manager.PROVIDERS
+        }
+        providers["openai"] = {"status": "unknown", "detail": "keyring only"}
+        snapshot = {"providers": {
+            "anthropic": {"models": [{"id": "claude-current", "name": "Claude Current"}]},
+            "opencode": {"models": [{"id": "grok-4.7", "name": "Grok 4.7"}]},
+        }}
+        health = manager.route_health(document, providers, snapshot)
+        self.assertEqual(health["status"], "error")
+        self.assertTrue(any(error["code"] == "provider_not_connected" for error in health["errors"]))
+        self.assertTrue(any(warning["code"] == "upstream_not_cataloged" for warning in health["warnings"]))
+
+    def test_catalog_summary_counts_only_models_new_since_last_refresh(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            snapshot = {
+                "checked_at": "2030-01-01T00:00:00Z",
+                "providers": {
+                    "openai": {
+                        "models": [
+                            {"id": "gpt-6.1-sol", "name": "GPT-6.1 Sol"},
+                            {"id": "gpt-new", "name": "GPT New"},
+                        ],
+                        "new_models": [{"id": "gpt-new", "name": "GPT New"}],
+                    },
+                },
+            }
+            with patch.object(manager, "SETTINGS_PATH", home / "settings.json"), \
+                 patch.object(manager.router, "CODEX_HOME", str(home)), \
+                 patch.object(manager.provider_catalog, "cached_snapshot", return_value=snapshot):
+                summary = manager.catalog_summary(snapshot)
+        self.assertEqual(summary["new_count"], 1)
+        self.assertEqual(summary["new_models"][0]["id"], "gpt-new")
 
     def test_link_codex_preserves_configuration_and_reports_router_state(self):
         with tempfile.TemporaryDirectory() as directory:

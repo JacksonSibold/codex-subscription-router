@@ -16,7 +16,7 @@ def _read_version() -> str:
             continue
         if value:
             return value
-    return "1.0.2"
+    return "1.1.0"
 
 
 __version__ = _read_version()

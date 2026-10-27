@@ -33,6 +33,29 @@ main{margin-left:236px;min-height:100vh}.topbar{height:112px;padding:0 40px;disp
 .plan-usage-panel .section-heading{align-items:flex-start}
 .plan-usage-panel .section-heading p{font-size:10px;line-height:1.55;color:#828790;margin:7px 0 0;max-width:760px}
 .plan-loading{display:flex;align-items:center;justify-content:center;gap:10px;min-height:150px;color:#8296ad;font-size:10px}
+
+/* Route diagnostics and provider catalog freshness */
+.route-issues-panel{margin-top:16px;padding:20px}
+.route-issues-panel.error{border-color:#68413f;background:linear-gradient(145deg,#1d171a,#141820)}
+.route-issues-panel.warning{border-color:#675535;background:linear-gradient(145deg,#1d1a14,#141820)}
+.catalog-freshness{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-top:14px;padding:10px 12px;border:1px solid #293548;border-radius:8px;background:#101722;color:#8796aa;font-size:10px}
+.catalog-freshness strong{color:#bad8fb}
+.route-issue-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:11px}
+.route-issue{display:flex;gap:10px;padding:12px;border:1px solid #343b48;border-radius:9px;background:#151a22}
+.route-issue.error{border-color:#5e3f3d;background:#211718}
+.route-issue.warning{border-color:#5d5136;background:#201c15}
+.route-issue>div{display:flex;flex-direction:column;gap:5px;min-width:0}
+.route-issue strong{font-size:11px;line-height:1.45;color:#e5e9ef}
+.route-issue p{margin:0;color:#aab3c0;font-size:10px;line-height:1.5}
+.route-issue code{color:#72839a;font-size:9px}
+.healthy-routes{display:flex;align-items:center;gap:11px;margin-top:14px;padding:14px;border:1px solid #2d4d63;border-radius:9px;background:#101d27;color:#99d4f5}
+.healthy-routes>div{display:flex;flex-direction:column;gap:4px}
+.healthy-routes strong{font-size:11px;color:#d8efff}
+.healthy-routes span{font-size:10px;color:#8599ad}
+.link-error span{display:block;margin-top:4px}
+.route-version-notice{display:flex;align-items:flex-start;gap:10px;margin-top:16px;color:#d8e8ff;background:#142337;border-color:#34516f;font-size:11px;line-height:1.55}
+.route-version-notice svg{margin-top:2px;color:#8fc3ff}
+@media(max-width:800px){.route-issue-list{grid-template-columns:1fr}}
 .plan-usage-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-top:17px}
 .plan-card{background:linear-gradient(145deg,#17243a,#111b2d);border:1px solid #263b5a;border-radius:11px;padding:14px;min-height:210px;display:flex;flex-direction:column;gap:11px}
 .plan-card-head{display:flex;align-items:center;gap:9px;min-width:0}

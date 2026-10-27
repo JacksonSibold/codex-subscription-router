@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.0 — 2026-10-26
+
+- Added a native Windows, Linux, and macOS Relay desktop companion that opens beside Codex and registers a hidden launch-with-Codex watcher.
+- Added persistent provider-catalog caching, startup and 15-minute background refreshes, and new-model markers in the add-model menu.
+- Added actionable model failure explanations for authentication, quota, model-ID, context-size, tool, upstream-outage, and local-endpoint errors.
+- Added route health checks for missing credentials and upstream IDs absent from the latest provider catalog.
+- Added explicit Codex-link repair reasons instead of a generic disconnected state.
+- Isolated source-tree previews from live Codex settings and removed browser-only startup as the default path.
+- Added native desktop packaging and isolated executable smoke tests to Windows, Linux, and macOS CI.
+
 ## 1.0.2 — 2026-10-24
 
 - Fixed model-picker saves failing with `runtime.default_model: default model must be visible and use an enabled provider` after hiding or removing the current default route, or disabling its provider.

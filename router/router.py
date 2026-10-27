@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 import anthropic_adapter
 import anthropic_oauth
 import credentials
+import error_explainer
 import local_adapter
 import namespace_tools
 import settings as router_settings
@@ -37,8 +38,8 @@ SETTINGS_PATH = os.environ.get("CODEX_ROUTER_SETTINGS") or os.path.join(HERE, "r
 ACTIVE_SETTINGS = router_settings.load(SETTINGS_PATH)
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("CODEX_ROUTER_PORT") or ACTIVE_SETTINGS["runtime"]["port"])
-LOG_PATH = os.path.join(HERE, "router.log")
-ORIGINS_PATH = os.path.join(HERE, "reasoning-origins.json")
+LOG_PATH = os.environ.get("CODEX_ROUTER_LOG") or os.path.join(HERE, "router.log")
+ORIGINS_PATH = os.environ.get("CODEX_ROUTER_ORIGINS") or os.path.join(HERE, "reasoning-origins.json")
 USAGE_PATH = os.environ.get("CODEX_ROUTER_USAGE_DB") or os.path.join(HERE, "router-usage.sqlite")
 
 
@@ -598,10 +599,16 @@ class Handler(BaseHTTPRequestHandler):
             if raw:
                 headers["Content-Length"] = str(len(raw))
         except Exception as exc:
-            message = f"model router: {lane} credential unavailable: {exc}"
-            self.respond_json(502, {"error": {"message": message}})
+            explanation = error_explainer.explain(lane, 401, str(exc).encode())
+            explanation["message"] = (
+                f"Relay: the {error_explainer.PROVIDER_NAMES.get(lane, lane)} credential is unavailable. "
+                f"Reconnect that account in Relay Connections. Provider detail: "
+                f"{error_explainer.provider_detail(str(exc))}"
+            )
+            explanation["code"] = "credential_unavailable"
+            self.respond_json(502, {"error": explanation})
             record_usage(preference, lane, model, 502, {})
-            log(f"ERROR {message}")
+            log(f"ERROR code=credential_unavailable lane={lane} model={model}")
             return
 
         status, sent, scanner = 502, 0, SseReasoningScanner()
@@ -612,6 +619,17 @@ class Handler(BaseHTTPRequestHandler):
             conn.request(self.command, prefix + self.path, body=raw or None, headers=headers)
             resp = conn.getresponse()
             status = resp.status
+            if status >= 400:
+                error_body = resp.read(1_000_000)
+                explanation = error_explainer.explain(lane, status, error_body)
+                self.respond_json(status, {"error": explanation})
+                conn.close()
+                record_usage(preference, lane, model, status, {})
+                log(
+                    f"ERROR code={explanation['code']} lane={lane} model={model} "
+                    f"status={status} detail={explanation['detail']!r}"
+                )
+                return
             self.send_response(status)
             for k, v in resp.getheaders():
                 if k.lower() not in HOP_BY_HOP and not (ns_map and k.lower() == "content-length"):
@@ -638,13 +656,18 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # upstream unreachable, or the app hung up mid-stream
             if not response_started:
                 status = 502
-                msg = json.dumps({"error": {"message": f"model router: {lane} upstream failed: {e}"}}).encode()
+                explanation = error_explainer.explain(lane, status, str(e).encode())
+                explanation["code"] = "upstream_unreachable"
+                msg = json.dumps({"error": explanation}).encode()
                 self.send_response(502)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(msg)))
                 self.end_headers()
                 self.wfile.write(msg)
-            log(f"ERROR {lane} {self.path} model={model}: {e!r}")
+            log(
+                f"ERROR code=upstream_unreachable lane={lane} path={self.path} "
+                f"model={model}: {error_explainer.provider_detail(str(e))}"
+            )
         record_usage(preference, lane, model, status, scanner.usage)
         if os.environ.get("ROUTER_DUMP_DIR"):  # debugging aid: keep the exact request sent upstream
             with open(os.path.join(os.environ["ROUTER_DUMP_DIR"], f"{lane}-{model}-{int(started * 1000)}.json"), "wb") as f:

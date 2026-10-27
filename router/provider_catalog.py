@@ -19,6 +19,10 @@ import credentials
 
 CACHE_SECONDS = 5 * 60
 OPENCODE_CACHE = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "opencode" / "models.json"
+CACHE_PATH = Path(
+    os.environ.get("CODEX_ROUTER_PROVIDER_CACHE")
+    or Path(__file__).resolve().with_name("provider-catalog-cache.json")
+)
 FALLBACKS = {
     "openai": [
         {"id": "gpt-6.1-sol", "name": "GPT-6.1 Sol"},
@@ -44,6 +48,31 @@ def _safe_error(exc: Exception) -> str:
     message = str(exc).replace("\n", " ").strip()[:240]
     message = _SECRET_ERROR.sub(lambda match: match.group(1) + "[hidden]", message)
     return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+
+
+def _load_disk_cache() -> dict[str, Any] | None:
+    try:
+        document = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(document, dict) or not isinstance(document.get("providers"), dict):
+        return None
+    return document
+
+
+def _save_disk_cache(snapshot: dict[str, Any]) -> None:
+    """Persist only model names and IDs; provider credentials never enter this file."""
+    try:
+        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temporary = CACHE_PATH.with_name(CACHE_PATH.name + ".tmp")
+        temporary.write_text(
+            json.dumps(snapshot, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(temporary, CACHE_PATH)
+    except OSError:
+        # A read-only install can still use the in-memory catalog.
+        pass
 
 
 def _clean_rows(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -199,9 +228,18 @@ def collect(codex_home: Path, force: bool = False) -> dict[str, Any]:
     global _CACHE, _CACHE_TIME
     now = time.time()
     with _LOCK:
+        if _CACHE is None:
+            _CACHE = _load_disk_cache()
         if not force and _CACHE is not None and now - _CACHE_TIME < CACHE_SECONDS:
             return copy.deepcopy(_CACHE)
         previous = (_CACHE or {}).get("providers", {})
+        previous_ids = {
+            provider: {
+                row.get("id") for row in item.get("models", []) if isinstance(row, dict)
+            }
+            for provider, item in previous.items()
+            if isinstance(item, dict)
+        }
         providers: dict[str, Any] = {}
         fetchers = {
             "openai": lambda: _openai_models(codex_home, force),
@@ -222,12 +260,20 @@ def collect(codex_home: Path, force: bool = False) -> dict[str, Any]:
             if not rows:
                 rows = FALLBACKS.get(provider, [])
                 source = source or "Relay built-in fallback"
+            clean_rows = _clean_rows(rows)
+            old_rows = previous.get(provider, {})
+            old_new = old_rows.get("new_models") if isinstance(old_rows, dict) else None
+            newly_seen = [
+                row for row in clean_rows
+                if previous_ids.get(provider) and row["id"] not in previous_ids[provider]
+            ] if error is None else (old_new if isinstance(old_new, list) else [])
             providers[provider] = {
-                "models": _clean_rows(rows),
-                "count": len(_clean_rows(rows)),
+                "models": clean_rows,
+                "count": len(clean_rows),
                 "source": source,
                 "error": error,
                 "stale": bool(error and rows),
+                "new_models": _clean_rows(newly_seen),
             }
         _CACHE = {
             "checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
@@ -235,9 +281,39 @@ def collect(codex_home: Path, force: bool = False) -> dict[str, Any]:
             "total": sum(item["count"] for item in providers.values()),
         }
         _CACHE_TIME = now
+        _save_disk_cache(_CACHE)
         return copy.deepcopy(_CACHE)
 
 
 def cached_snapshot() -> dict[str, Any] | None:
+    global _CACHE
     with _LOCK:
+        if _CACHE is None:
+            _CACHE = _load_disk_cache()
         return copy.deepcopy(_CACHE) if _CACHE is not None else None
+
+
+def freshness(snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return a small freshness summary suitable for the management UI."""
+    snapshot = snapshot or cached_snapshot() or {}
+    checked_at = snapshot.get("checked_at")
+    age_seconds: int | None = None
+    if isinstance(checked_at, str):
+        try:
+            from datetime import datetime, timezone
+
+            checked = datetime.fromisoformat(checked_at.replace("Z", "+00:00"))
+            age_seconds = max(0, int((datetime.now(timezone.utc) - checked).total_seconds()))
+        except ValueError:
+            pass
+    return {
+        "checked_at": checked_at,
+        "age_seconds": age_seconds,
+        "stale": age_seconds is None or age_seconds > CACHE_SECONDS,
+        "interval_seconds": CACHE_SECONDS,
+        "failed_providers": [
+            provider
+            for provider, catalog in snapshot.get("providers", {}).items()
+            if isinstance(catalog, dict) and catalog.get("error")
+        ],
+    }

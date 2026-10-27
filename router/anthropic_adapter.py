@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import anthropic_oauth
+import error_explainer
 
 ANTHROPIC_MODELS = {"claude-sonnet-5-5", "claude-opus-5-5"}
 
@@ -599,10 +600,16 @@ def run(
         conn.request("POST", "/v1/messages?beta=true", body=raw, headers=_headers(token, session_id))
         resp = conn.getresponse()
         if resp.status != 200:
-            error = resp.read()
-            start(resp.status, [("Content-Type", "application/json"), ("Content-Length", str(len(error)))])
-            write_raw(error)
-            return resp.status, len(error), {}
+            error = resp.read(1_000_000)
+            explanation = error_explainer.explain("anthropic", resp.status, error)
+            payload = json.dumps({"error": explanation}, ensure_ascii=False).encode()
+            start(resp.status, [("Content-Type", "application/json"), ("Content-Length", str(len(payload)))])
+            write_raw(payload)
+            log(
+                f"ERROR code={explanation['code']} lane=anthropic status={resp.status} "
+                f"detail={explanation['detail']!r}"
+            )
+            return resp.status, len(payload), {}
 
         start(200, [("Content-Type", "text/event-stream; charset=utf-8")])
         translator = ResponsesTranslator(str(body.get("model")), tool_kinds, emit)
@@ -627,14 +634,23 @@ def run(
                 translator.finish()
             elif event == "error":
                 err = data.get("error") or {}
-                translator.fail(str(err.get("message") or "Anthropic streaming error"))
+                explanation = error_explainer.explain(
+                    "anthropic", 502, json.dumps(err, ensure_ascii=False).encode()
+                )
+                translator.fail(explanation["message"])
+                log(
+                    f"ERROR code={explanation['code']} lane=anthropic stream "
+                    f"detail={explanation['detail']!r}"
+                )
         translator.finish()
         return 200, sent, dict(translator.usage)
     except Exception as exc:
-        log(f"ERROR anthropic stream: {exc!r}")
+        explanation = error_explainer.explain("anthropic", 502, str(exc).encode())
+        log(f"ERROR code=upstream_unreachable lane=anthropic stream detail={explanation['detail']!r}")
         try:
-            start(502, [("Content-Type", "application/json")])
-            write_raw(json.dumps({"error": {"message": f"Anthropic bridge failed: {exc}"}}).encode())
+            error = json.dumps({"error": explanation}, ensure_ascii=False).encode()
+            start(502, [("Content-Type", "application/json"), ("Content-Length", str(len(error)))])
+            write_raw(error)
         except Exception:
             pass
         return 502, sent, {}

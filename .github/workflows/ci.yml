@@ -50,6 +50,11 @@ jobs:
       - name: Install interface dependencies
         working-directory: app
         run: npm ci
+      - name: Install Linux desktop window libraries
+        if: matrix.platform == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libgl1 libegl1 libxkbcommon-x11-0 libxcb-cursor0
+      - name: Install desktop build dependencies
+        run: python -m pip install -r desktop/requirements.txt
       - name: Production interface build
         working-directory: app
         run: npm run build
@@ -66,6 +71,7 @@ jobs:
         run: |
           VERSION="$(tr -d '\r\n' < VERSION)"
           python scripts/package_release.py --platform "${{ matrix.platform }}" --version "$VERSION"
+          python scripts/package_desktop.py --version "$VERSION"
           if [ "${{ matrix.platform }}" = "windows" ]; then
             python scripts/verify_release.py "release/relay-${VERSION}-windows.zip"
           else

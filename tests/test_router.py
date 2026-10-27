@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
@@ -199,6 +200,22 @@ class _FakeHttpsConnection:
         self.closed = True
 
 
+class _FakeErrorResponse:
+    status = 404
+
+    def getheaders(self):
+        return [("Content-Type", "application/json")]
+
+    def read(self, size=-1):
+        return b'{"error":{"message":"Model gpt-retired is not available"}}'
+
+
+class _FakeErrorConnection(_FakeHttpsConnection):
+    def __init__(self, host, timeout=None, context=None):
+        super().__init__(host, timeout=timeout, context=context)
+        self.response = _FakeErrorResponse()
+
+
 class _LocalChat(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     calls = []
@@ -265,6 +282,41 @@ class RouterIntegrationTests(unittest.TestCase):
                 dashboard = usage_store.dashboard(Path(router.USAGE_PATH), 30)
                 self.assertEqual(dashboard["providers"][0]["provider"], "kimi")
                 self.assertEqual(dashboard["totals"]["total_tokens"], 21)
+            finally:
+                router.ACTIVE_SETTINGS, router.USAGE_PATH = original_settings, original_usage
+
+    def test_upstream_model_error_is_returned_as_actionable_relay_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            document = settings.default_settings()
+            original_settings, original_usage = router.ACTIVE_SETTINGS, router.USAGE_PATH
+            try:
+                router.ACTIVE_SETTINGS = document
+                router.USAGE_PATH = str(Path(directory) / "usage.sqlite")
+                server, thread = self._router_server()
+                try:
+                    body = json.dumps({
+                        "model": "gpt-6.1-sol",
+                        "stream": True,
+                        "input": [{"type": "message", "role": "user", "content": "hello"}],
+                    }).encode()
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/responses",
+                        data=body, method="POST",
+                        headers={"Content-Type": "application/json", "Authorization": "Bearer hidden"},
+                    )
+                    with patch.object(router, "HTTPS_CONNECTION", _FakeErrorConnection):
+                        with self.assertRaises(urllib.error.HTTPError) as caught:
+                            urllib.request.urlopen(request, timeout=10)
+                        result = json.loads(caught.exception.read())
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join()
+                error = result["error"]
+                self.assertEqual(error["code"], "model_unavailable")
+                self.assertEqual(error["provider"], "openai")
+                self.assertIn("Upstream model ID", error["action"])
+                self.assertIn("gpt-retired", error["action"])
             finally:
                 router.ACTIVE_SETTINGS, router.USAGE_PATH = original_settings, original_usage
 

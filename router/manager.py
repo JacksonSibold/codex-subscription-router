@@ -41,6 +41,7 @@ MANAGER_PORT = int(os.environ.get("CODEX_ROUTER_MANAGER_PORT") or 18766)
 DEFAULT_STATIC = HERE.parent / "app" / "dist" if (HERE.parent / "app" / "dist").is_dir() else HERE / "app"
 STATIC_DIR = Path(os.environ.get("CODEX_ROUTER_STATIC") or DEFAULT_STATIC).resolve()
 OPENCODE_AUTH_PATH = Path(os.environ.get("OPENCODE_AUTH_PATH") or Path.home() / ".local" / "share" / "opencode" / "auth.json")
+CATALOG_REFRESH_SECONDS = 15 * 60
 PROVIDERS = {
     "openai": {"name": "OpenAI", "auth": "Existing Codex / ChatGPT sign-in", "docs": "https://developers.openai.com/codex/auth"},
     "opencode": {"name": "OpenCode Go", "auth": "Personal API key", "docs": "https://opencode.ai/auth"},
@@ -196,6 +197,38 @@ def available_models() -> list[dict[str, str]]:
     return unique
 
 
+def catalog_summary(snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Describe provider catalog freshness and models not yet in the picker."""
+    snapshot = snapshot if snapshot is not None else provider_catalog.cached_snapshot() or {}
+    document = settings.load(SETTINGS_PATH)
+    configured = {
+        (model["provider"], model.get("upstream_id") or model["id"])
+        for model in document["models"]
+    }
+    new_models: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for provider, catalog in snapshot.get("providers", {}).items():
+        if not isinstance(catalog, dict):
+            continue
+        for model in catalog.get("new_models", []):
+            if not isinstance(model, dict) or not isinstance(model.get("id"), str):
+                continue
+            key = (provider, model["id"])
+            if key in configured or key in seen:
+                continue
+            seen.add(key)
+            new_models.append({
+                "provider": provider,
+                "id": model["id"],
+                "name": model.get("name") or model["id"],
+            })
+    return {
+        **provider_catalog.freshness(snapshot),
+        "new_count": len(new_models),
+        "new_models": new_models[:40],
+    }
+
+
 def usage_path() -> Path:
     return Path(os.environ.get("CODEX_ROUTER_USAGE_DB") or router.USAGE_PATH)
 
@@ -344,19 +377,95 @@ def codex_link_status() -> dict[str, Any]:
         except OSError:
             catalog_matches = False
     expected_base = f"http://127.0.0.1:{router.PORT}"
+    catalog_models: list[Any] = []
+    try:
+        catalog_models = json.loads(catalog_path.read_text(encoding="utf-8")).get("models") or []
+    except (OSError, ValueError, AttributeError):
+        pass
+    model_provider = document.get("model_provider")
+    base_url = provider.get("base_url")
+    linked = bool(
+        model_provider == "mixed"
+        and catalog_matches
+        and base_url == expected_base
+        and catalog_path.is_file()
+    )
+    reason, action = "", ""
+    if not config_path.is_file():
+        reason = "Codex configuration was not found."
+        action = "Open Codex once, then choose Link Codex again."
+    elif model_provider != "mixed":
+        reason = f"Codex is currently using the {model_provider or 'default'} provider."
+        action = "Choose Link Codex on this PC to restore the Relay provider without resetting your other Codex settings."
+    elif not catalog_matches:
+        reason = "Codex points at a different model catalog file."
+        action = "Choose Link Codex on this PC to regenerate the catalog and connect it."
+    elif base_url != expected_base:
+        reason = f"Codex points at {base_url or 'a missing address'} instead of Relay."
+        action = "Start Relay, then choose Link Codex on this PC."
+    elif not catalog_path.is_file():
+        reason = "The Relay model catalog file is missing."
+        action = "Choose Link Codex on this PC to regenerate it."
     result.update({
-        "model_provider": document.get("model_provider"),
+        "model_provider": model_provider,
         "default_model": document.get("model"),
         "catalog_matches": catalog_matches,
-        "provider_base_url": provider.get("base_url"),
-        "linked": bool(
-            document.get("model_provider") == "mixed"
-            and catalog_matches
-            and provider.get("base_url") == expected_base
-            and catalog_path.is_file()
-        ),
+        "provider_base_url": base_url,
+        "catalog_models": len(catalog_models) if isinstance(catalog_models, list) else 0,
+        "linked": linked,
+        "reason": reason,
+        "action": action,
     })
     return result
+
+
+def route_health(
+    document: dict[str, Any],
+    providers: dict[str, dict[str, Any]],
+    catalog_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate every configured route against credentials and the latest catalog."""
+    warnings: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    snapshot = catalog_snapshot or provider_catalog.cached_snapshot() or {}
+    cataloged = {
+        provider: {row.get("id") for row in item.get("models", []) if isinstance(row, dict)}
+        for provider, item in snapshot.get("providers", {}).items()
+        if isinstance(item, dict)
+    }
+    for model in document["models"]:
+        provider = model["provider"]
+        upstream = model.get("upstream_id") or model["id"]
+        provider_enabled = bool(document["providers"][provider]["enabled"])
+        if not provider_enabled:
+            continue
+        status = str(providers.get(provider, {}).get("status") or "unknown")
+        if model["visible"] and provider not in ("openai", "local") and status != "credential_found":
+            errors.append({
+                "route_id": model["id"],
+                "provider": provider,
+                "code": "provider_not_connected",
+                "message": f"{PROVIDERS[provider]['name']} is not connected for {model['display_name']}.",
+                "action": "Reconnect that provider on Connections, or hide this route.",
+            })
+        known = cataloged.get(provider)
+        if known and upstream not in known:
+            warnings.append({
+                "route_id": model["id"],
+                "provider": provider,
+                "code": "upstream_not_cataloged",
+                "message": (
+                    f"{model['display_name']} uses upstream ID {upstream!r}, which is not in the "
+                    f"latest {PROVIDERS[provider]['name']} catalog."
+                ),
+                "action": "Refresh catalogs. If the model was renamed, edit its Upstream model ID.",
+            })
+    return {
+        "status": "error" if errors else "warning" if warnings else "ready",
+        "errors": errors,
+        "warnings": warnings,
+        "routes_checked": len(document["models"]),
+    }
 
 
 def link_codex() -> dict[str, Any]:
@@ -399,6 +508,7 @@ def link_codex() -> dict[str, Any]:
 def state() -> dict[str, Any]:
     document = settings.load(SETTINGS_PATH)
     providers = provider_state()
+    provider_snapshot = provider_catalog.cached_snapshot() or {}
     catalog_path = Path(router.CODEX_HOME) / "mixed-models.json"
     try:
         with catalog_path.open(encoding="utf-8") as handle:
@@ -412,7 +522,9 @@ def state() -> dict[str, Any]:
         "router": router_health(),
         "catalog": [{"id": m.get("slug"), "name": m.get("display_name")} for m in catalog],
         "available_models": available_models(),
-        "provider_catalogs": provider_catalog.cached_snapshot() or {},
+        "provider_catalogs": provider_snapshot,
+        "provider_catalog_status": catalog_summary(provider_snapshot),
+        "route_health": route_health(document, providers, provider_snapshot),
         "codex_link": codex_link_status(),
         "settings_location": str(SETTINGS_PATH),
         "catalog_location": str(catalog_path),
@@ -503,7 +615,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             parsed = urllib.parse.urlsplit(self.path)
-            if parsed.path == "/api/state":
+            if parsed.path == "/api/health":
+                health = router_health()
+                self.reply(200, {
+                    "ok": True,
+                    "version": version.__version__,
+                    "manager_port": MANAGER_PORT,
+                    "settings_location": str(SETTINGS_PATH),
+                    "router_reachable": bool(health.get("reachable")),
+                    "router_version": health.get("relay_version"),
+                })
+            elif parsed.path == "/api/state":
                 self.reply(200, state())
             elif parsed.path == "/api/usage":
                 query = urllib.parse.parse_qs(parsed.query)
@@ -517,9 +639,20 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/provider-models":
                 query = urllib.parse.parse_qs(parsed.query)
                 force = (query.get("refresh") or ["0"])[0] in ("1", "true", "yes")
-                self.reply(200, provider_catalog.collect(Path(router.CODEX_HOME), force=force))
+                snapshot = provider_catalog.collect(Path(router.CODEX_HOME), force=force)
+                snapshot.update(catalog_summary(snapshot))
+                self.reply(200, snapshot)
             elif parsed.path == "/api/diagnostics":
-                self.reply(200, {"router": router_health(), "log": redacted_log()})
+                document = settings.load(SETTINGS_PATH)
+                providers = provider_state()
+                snapshot = provider_catalog.cached_snapshot() or {}
+                self.reply(200, {
+                    "router": router_health(),
+                    "route_health": route_health(document, providers, snapshot),
+                    "provider_catalog": catalog_summary(snapshot),
+                    "codex_link": codex_link_status(),
+                    "log": redacted_log(),
+                })
             elif parsed.path.startswith("/api/"):
                 self.reply(404, {"error": "Not found"})
             else:
@@ -605,6 +738,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     server = ThreadingHTTPServer(("127.0.0.1", MANAGER_PORT), Handler)
+    threading.Thread(target=catalog_refresh_loop, name="relay-catalog-refresh", daemon=True).start()
     address = f"http://127.0.0.1:{MANAGER_PORT}"
     print(f"Router manager listening on {address}", flush=True)
     if "--open" in sys.argv:
@@ -615,6 +749,17 @@ def main():
         pass
     finally:
         server.server_close()
+
+
+def catalog_refresh_loop() -> None:
+    """Refresh provider catalogs in the background without delaying the desktop window."""
+    while True:
+        try:
+            provider_catalog.collect(Path(router.CODEX_HOME), force=True)
+        except Exception as exc:
+            # This thread must not terminate because one provider refresh failed.
+            print(f"Provider catalog refresh failed: {type(exc).__name__}", file=sys.stderr, flush=True)
+        time.sleep(CATALOG_REFRESH_SECONDS)
 
 
 if __name__ == "__main__":

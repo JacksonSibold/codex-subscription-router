@@ -14,6 +14,7 @@ import uuid
 
 import credentials
 import namespace_tools
+import error_explainer
 import settings
 
 SSL_CONTEXT = ssl.create_default_context()
@@ -435,9 +436,12 @@ def run_chat(body: dict[str, Any], local: dict[str, Any],
             error = response.read(2_000_001)
             if len(error) > 2_000_000:
                 error = json.dumps({"error": {"message": "Local server error response is too large"}}).encode()
-            start(response.status, [("Content-Type", "application/json"), ("Content-Length", str(len(error)))])
-            write_raw(error)
-            return response.status, len(error), {}
+            explanation = error_explainer.explain("local", response.status, error)
+            payload = json.dumps({"error": explanation}, ensure_ascii=False).encode()
+            start(response.status, [("Content-Type", "application/json"), ("Content-Length", str(len(payload)))])
+            write_raw(payload)
+            log(f"ERROR code={explanation['code']} lane=local chat status={response.status}")
+            return response.status, len(payload), {}
         content_type = (response.getheader("Content-Type") or "").lower()
         if "application/json" in content_type and "text/event-stream" not in content_type:
             document = json.loads(response.read(10_000_001))
@@ -485,12 +489,13 @@ def run_chat(body: dict[str, Any], local: dict[str, Any],
             translator.finish(model)
         return 200, sent, dict(translator.usage)
     except (OSError, ValueError, http.client.HTTPException) as exc:
-        log(f"ERROR local chat: {exc!r}")
+        explanation = error_explainer.explain("local", 502, str(exc).encode())
+        log(f"ERROR code=upstream_unreachable lane=local chat detail={explanation['detail']!r}")
         try:
             if response_started:
-                translator.fail(model, f"Local model bridge failed: {type(exc).__name__}")
+                translator.fail(model, explanation["message"])
             else:
-                error = json.dumps({"error": {"message": f"Local model bridge failed: {type(exc).__name__}"}}).encode()
+                error = json.dumps({"error": explanation}, ensure_ascii=False).encode()
                 start(502, [("Content-Type", "application/json"), ("Content-Length", str(len(error)))])
                 write_raw(error)
         except Exception:
@@ -555,9 +560,12 @@ def run_responses(body: dict[str, Any], local: dict[str, Any],
             error = response.read(2_000_001)
             if len(error) > 2_000_000:
                 error = json.dumps({"error": {"message": "Local server error response is too large"}}).encode()
-            start(response.status, [("Content-Type", "application/json"), ("Content-Length", str(len(error)))])
-            write_raw(error)
-            return response.status, len(error), {}
+            explanation = error_explainer.explain("local", response.status, error)
+            payload = json.dumps({"error": explanation}, ensure_ascii=False).encode()
+            start(response.status, [("Content-Type", "application/json"), ("Content-Length", str(len(payload)))])
+            write_raw(payload)
+            log(f"ERROR code={explanation['code']} lane=local responses status={response.status}")
+            return response.status, len(payload), {}
         content_type = response.getheader("Content-Type") or "text/event-stream"
         safe_headers = [(key, value) for key, value in response.getheaders() if key.lower() not in SKIP_RESPONSE_HEADERS]
         if "application/json" in content_type.lower() and "text/event-stream" not in content_type.lower():
@@ -589,10 +597,11 @@ def run_responses(body: dict[str, Any], local: dict[str, Any],
         scanner.flush()
         return response.status, sent, dict(scanner.usage)
     except (OSError, ValueError, http.client.HTTPException) as exc:
-        log(f"ERROR local responses: {exc!r}")
+        explanation = error_explainer.explain("local", 502, str(exc).encode())
+        log(f"ERROR code=upstream_unreachable lane=local responses detail={explanation['detail']!r}")
         try:
             if not response_started:
-                error = json.dumps({"error": {"message": f"Local model bridge failed: {type(exc).__name__}"}}).encode()
+                error = json.dumps({"error": explanation}, ensure_ascii=False).encode()
                 start(502, [("Content-Type", "application/json"), ("Content-Length", str(len(error)))])
                 write_raw(error)
         except Exception:
