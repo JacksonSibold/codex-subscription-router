@@ -43,7 +43,7 @@ class DesktopTests(unittest.TestCase):
         with patch.dict(os.environ, {"CODEX_ROUTER_MANAGER_PORT": "19001", "CODEX_ROUTER_PORT": "19002"}), \
              patch.object(relay_desktop, "_json_url", side_effect=[
                  {"relay_version": "1.1.0"}, {"ok": True},
-             ]), patch.object(relay_desktop, "_launch_child") as launch:
+             ]), patch.object(relay_desktop, "_service_thread") as launch:
             owned = relay_desktop.ensure_services()
         self.assertEqual(owned, [])
         launch.assert_not_called()

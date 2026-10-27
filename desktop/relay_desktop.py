@@ -80,38 +80,35 @@ def _wait_json(url: str, timeout: float = 15.0) -> dict:
     raise RuntimeError(f"Relay service did not start at {url}: {last_error}")
 
 
-def _launch_child(argument: str) -> subprocess.Popen:
-    if FROZEN:
-        command = [sys.executable, argument]
+def _service_thread(role: str) -> threading.Thread:
+    root = SOURCE_ROOT if not FROZEN else RESOURCE_ROOT
+    sys.path.insert(0, str(root / "router"))
+    if role == "router":
+        import router
+        target = router.main
     else:
-        command = [sys.executable, str(Path(__file__).resolve()), argument]
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-    return subprocess.Popen(
-        command,
-        cwd=os.environ["CODEX_ROUTER_DATA_DIR"],
-        env=os.environ.copy(),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=flags,
-        close_fds=True,
-    )
+        import manager
+        target = manager.main
+    thread = threading.Thread(target=target, name=f"relay-{role}", daemon=True)
+    thread.start()
+    return thread
 
 
-def ensure_services() -> list[subprocess.Popen]:
+def ensure_services() -> list[threading.Thread]:
     manager_port = int(os.environ["CODEX_ROUTER_MANAGER_PORT"])
     router_port = int(os.environ["CODEX_ROUTER_PORT"])
-    owned: list[subprocess.Popen] = []
+    owned: list[threading.Thread] = []
     try:
         _json_url(f"http://127.0.0.1:{router_port}/__router_health", timeout=1.0)
     except (OSError, ValueError, urllib.error.URLError):
-        owned.append(_launch_child("--router-child"))
+        owned.append(_service_thread("router"))
         _wait_json(f"http://127.0.0.1:{router_port}/__router_health", timeout=15)
     try:
         manager = _json_url(f"http://127.0.0.1:{manager_port}/api/health", timeout=1.0)
         if not manager.get("ok"):
             raise RuntimeError("Manager health did not report ok")
     except (OSError, ValueError, urllib.error.URLError, RuntimeError):
-        owned.append(_launch_child("--manager-child"))
+        owned.append(_service_thread("manager"))
         _wait_json(f"http://127.0.0.1:{manager_port}/api/health", timeout=15)
     return owned
 
@@ -463,7 +460,7 @@ def main(argv: list[str] | None = None) -> int:
         _ensure_first_run_startup()
     if _show_existing_instance():
         return 0
-    owned: list[subprocess.Popen] = []
+    owned: list[threading.Thread] = []
     try:
         owned = ensure_services()
     except Exception as exc:
@@ -485,12 +482,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         run_window(controller)
     finally:
-        for process in reversed(owned):
-            try:
-                process.terminate()
-                process.wait(timeout=5)
-            except Exception:
-                pass
         if server is not None:
             server.shutdown()
             server.server_close()
