@@ -125,13 +125,61 @@ def _text_from_content(content: Any) -> str:
     return "\n".join(parts)
 
 
+def agent_message_text(item: dict[str, Any]) -> str:
+    """Readable text of a Codex multi-agent message, labelled with its sender and recipient."""
+    text = _text_from_content(item.get("content"))
+    if not text:
+        return ""
+    author, recipient = item.get("author"), item.get("recipient")
+    label = " ".join(part for part in (
+        f"from {author}" if isinstance(author, str) and author else "",
+        f"to {recipient}" if isinstance(recipient, str) and recipient else "",
+    ) if part)
+    return f"[Agent message {label}]\n{text}" if label else text
+
+
 # MCP server tools arrive as {"type": "namespace", "name": "mcp__node_repl", "tools": [...]}.
 # Anthropic has no namespaces, so allowed groups are flattened to "<namespace>__<tool>" and
 # mapped back on the way out. Connector app namespaces stay excluded (huge schemas).
-from namespace_tools import ALLOWED_PREFIXES as NAMESPACE_PREFIXES, join_name as _join_name
+from namespace_tools import FLATTEN_PREFIXES as NAMESPACE_PREFIXES, join_name as _join_name
 
 LAST_SKIPPED_NAMESPACES: list[str] = []
 namespaced: dict[str, tuple[str, str]] = {}
+
+
+def _anthropic_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Flatten root object unions, which Anthropic rejects as tool input schemas.
+
+    The original tool handler still validates the selected variant. Preserve the
+    fields here while relaxing only the cross-variant selection constraints.
+    """
+    result = dict(schema)
+    properties = dict(result.get("properties") or {})
+    required = set(result.get("required") or [])
+    for keyword in ("anyOf", "oneOf", "allOf"):
+        variants = result.pop(keyword, None)
+        if not isinstance(variants, list) or not variants:
+            continue
+        alternatives = []
+        for variant in variants:
+            if not isinstance(variant, dict):
+                continue
+            variant = _anthropic_schema(variant)
+            for name, value in (variant.get("properties") or {}).items():
+                if name not in properties:
+                    properties[name] = value
+                elif properties[name] != value:
+                    properties[name] = {"anyOf": [properties[name], value]}
+            alternatives.append(set(variant.get("required") or []))
+        if alternatives:
+            required |= set.union(*alternatives) if keyword == "allOf" else set.intersection(*alternatives)
+    result["type"] = "object"
+    result["properties"] = properties
+    if required:
+        result["required"] = sorted(required)
+    else:
+        result.pop("required", None)
+    return result
 
 
 def _tool_definitions(body: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, str]]:
@@ -207,6 +255,7 @@ def _tool_definitions(body: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[
             schema = tool.get("parameters") or {"type": "object", "properties": {}}
             if not isinstance(schema, dict) or schema.get("type") != "object":
                 schema = {"type": "object", "properties": {}}
+            schema = _anthropic_schema(schema)
             kinds[name] = "function"
         else:
             continue
@@ -244,6 +293,12 @@ def build_payload(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]
             elif role == "assistant":
                 _append_message(messages, "assistant", [{"type": "text", "text": text}])
             elif role == "user":
+                _append_message(messages, "user", [{"type": "text", "text": text}])
+        elif typ == "agent_message":
+            # Multi-agent traffic (a parent's task for a subagent, or a subagent's report) arrives
+            # as agent_message; its encrypted part is OpenAI-only, the input_text part is readable.
+            text = agent_message_text(item)
+            if text:
                 _append_message(messages, "user", [{"type": "text", "text": text}])
         elif typ == "custom_tool_call":
             call_id = item.get("call_id") or ("call_" + uuid.uuid4().hex)

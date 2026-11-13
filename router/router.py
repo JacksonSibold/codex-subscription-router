@@ -74,6 +74,9 @@ UPSTREAM_HEADERS = {"content-type", "accept", "user-agent", "openai-beta", "orig
 # OpenAI-only tool types: connected-app namespaces (~100K tokens of schemas per request, and
 # some upstreams such as xAI reject them) and OpenAI's hosted web search.
 OPENAI_ONLY_TOOLS = ("namespace", "web_search")
+# History items from OpenAI's hosted tools; third-party Responses endpoints reject them.
+OPENAI_ONLY_ITEMS = ("web_search_call", "tool_search_call", "tool_search_output", "image_generation_call",
+                     "file_search_call", "code_interpreter_call")
 SSL_CTX = ssl.create_default_context()
 HTTPS_CONNECTION = http.client.HTTPSConnection
 MAX_ORIGINS = 20000
@@ -188,6 +191,15 @@ def _catalog_map(filename):
     }
 
 
+def _multi_agent_messages(cache):
+    """The multi-agent tool messages from any cached OpenAI catalog entry that has them."""
+    for entry in cache.values():
+        messages = entry.get("model_messages") if isinstance(entry, dict) else None
+        if isinstance(messages, dict) and messages.get("multi_agent"):
+            return copy.deepcopy(messages["multi_agent"])
+    return None
+
+
 def build_catalog(document=None, output_path=None):
     """Build the ordered picker without changing Codex's configuration or restarting it."""
     document = document or ACTIVE_SETTINGS
@@ -237,6 +249,15 @@ def build_catalog(document=None, output_path=None):
             "node_repl_disabled": not tools["computer_use"],
             "multi_agent_version": "v2" if preference["subagents"] else "disabled",
         })
+        if preference["subagents"] and provider != "openai":
+            # Codex only offers spawn_agent/send_message/wait_agent to a model whose catalog entry
+            # carries the multi-agent tool messages; third-party bases have none, so borrow them.
+            messages = dict(item.get("model_messages") or {})
+            if "multi_agent" not in messages:
+                borrowed = _multi_agent_messages(cache)
+                if borrowed is not None:
+                    messages["multi_agent"] = borrowed
+                    item["model_messages"] = messages
         if not tools["shell"]:
             item["shell_type"] = None
             item["apply_patch_tool_type"] = None
@@ -338,6 +359,78 @@ def drop_foreign_reasoning(body, lane):
     return len(items) - len(kept)
 
 
+def repair_call_ids(items):
+    """Give every tool call and output a non-empty call_id; drop what cannot be paired.
+
+    OpenAI-lane history can carry calls with only an "id" (or nothing), and OpenCode rejects
+    an empty call_id. A call without call_id borrows its id; an output without call_id takes
+    the next repaired call of its kind. Unrecoverable calls and orphan outputs are dropped.
+    Returns (kept items, number of call_ids filled in).
+    """
+    kept, seen, pending, filled = [], set(), {}, 0
+    for item in items:
+        kind = item.get("type") if isinstance(item, dict) else None
+        if kind in OPENAI_ONLY_ITEMS:
+            continue
+        if not isinstance(kind, str) or not ("call_id" in item or kind.endswith(("_call", "_call_output"))):
+            kept.append(item)
+            continue
+        call_id = item.get("call_id")
+        if kind.endswith("_output"):
+            if not (isinstance(call_id, str) and call_id):
+                call_id = (pending.get(kind[:-len("_output")]) or [None]).pop(0)
+                if call_id is None:
+                    continue
+                item["call_id"] = call_id
+                filled += 1
+            if call_id not in seen:
+                continue
+        else:
+            if not (isinstance(call_id, str) and call_id):
+                call_id = item.get("id") if isinstance(item.get("id"), str) and item.get("id") else None
+                pending.setdefault(kind, []).append(call_id)
+                if call_id is None:
+                    continue
+                item["call_id"] = call_id
+                filled += 1
+            seen.add(call_id)
+        kept.append(item)
+    return kept, filled
+
+
+def without_expired_reasoning(body, lane, status, error_body):
+    """Return a re-encoded request with reasoning items removed when a third-party provider
+    rejected it for referencing an expired or unknown reasoning item; otherwise None."""
+    if lane not in ("opencode", "kimi", "local") or status != 400 or not isinstance(body, dict):
+        return None
+    detail = error_body.decode("utf-8", "replace").lower()
+    if "reasoning item" not in detail or not ("not found" in detail or "expired" in detail):
+        return None
+    items = body.get("input")
+    if not isinstance(items, list):
+        return None
+    kept = [i for i in items if not (isinstance(i, dict) and i.get("type") == "reasoning")]
+    if len(kept) == len(items):
+        return None
+    body["input"] = kept
+    return json.dumps(body).encode()
+
+
+TOP_LEVEL_SCHEMA_REJECTS =("oneOf", "anyOf", "allOf", "enum", "const", "not")
+
+
+def portable_schema(schema):
+    """Third-party function schemas must be a plain top-level object (OpenCode, Kimi, local)."""
+    if not isinstance(schema, dict):
+        return {"type": "object", "properties": {}}
+    if schema.get("type") == "object" and not any(k in schema for k in TOP_LEVEL_SCHEMA_REJECTS):
+        return schema
+    flat = anthropic_adapter._anthropic_schema(schema)
+    for key in ("enum", "const", "not"):
+        flat.pop(key, None)
+    return flat
+
+
 def tidy_for_opencode(body):
     """Make a Codex request acceptable to OpenCode Go's standard Responses endpoint."""
     changed = False
@@ -348,7 +441,13 @@ def tidy_for_opencode(body):
     tools = body.get("tools")
     if isinstance(tools, list):
         plain = [t for t in tools if not (isinstance(t, dict) and t.get("type") in OPENAI_ONLY_TOOLS)]
-        changed = len(plain) != len(tools)
+        changed |= len(plain) != len(tools)
+        for tool in plain:
+            if isinstance(tool, dict) and tool.get("type") == "function":
+                schema = portable_schema(tool.get("parameters"))
+                if schema != tool.get("parameters"):
+                    tool["parameters"] = schema
+                    changed = True
         body["tools"] = plain
         if not plain:
             body.pop("tools")
@@ -357,8 +456,21 @@ def tidy_for_opencode(body):
     if isinstance(items, list):
         # OpenAI-lane turns leave "additional_tools" declarations (responses-lite) in the history.
         kept = [i for i in items if not (isinstance(i, dict) and i.get("type") == "additional_tools")]
-        changed |= len(kept) != len(items)
-        body["input"] = kept
+        kept, filled = repair_call_ids(kept)
+        changed |= len(kept) != len(items) or filled > 0
+        # Subagent tasks and reports arrive as agent_message (with an OpenAI-encrypted part);
+        # standard Responses endpoints only accept ordinary messages.
+        converted = []
+        for item in kept:
+            if isinstance(item, dict) and item.get("type") == "agent_message":
+                text = anthropic_adapter.agent_message_text(item)
+                changed = True
+                if text:
+                    converted.append({"type": "message", "role": "user",
+                                      "content": [{"type": "input_text", "text": text}]})
+                continue
+            converted.append(item)
+        body["input"] = converted
     for item in body.get("input") or []:
         # Codex replays reasoning with "content": null; xAI rejects the whole blob over it.
         if isinstance(item, dict) and item.get("type") == "reasoning" and "content" in item \
@@ -379,6 +491,10 @@ def apply_tool_policy(body, preference):
         kind = tool.get("type")
         name = str(tool.get("name") or "")
         if kind == "namespace":
+            if name.startswith("collaboration"):
+                return bool(preference.get("subagents"))
+            if name.startswith(namespace_tools.AGENT_NAMESPACES):
+                return True
             computer = name.startswith(namespace_tools.ALLOWED_PREFIXES)
             return tools["computer_use"] if computer else tools["connected_apps"]
         if kind == "web_search" or (isinstance(kind, str) and kind.startswith("web_search")):
@@ -620,8 +736,21 @@ class Handler(BaseHTTPRequestHandler):
             conn.request(self.command, prefix + self.path, body=raw or None, headers=headers)
             resp = conn.getresponse()
             status = resp.status
+            error_body = resp.read(1_000_000) if status >= 400 else b""
+            retry_raw = without_expired_reasoning(body, lane, status, error_body)
+            if retry_raw is not None:
+                # Third-party providers keep reasoning items only briefly; replaying an expired
+                # one fails the whole turn. Retry once without replayed reasoning.
+                conn.close()
+                raw = retry_raw
+                headers["Content-Length"] = str(len(raw))
+                log(f"RETRY lane={lane} model={model} without expired reasoning items")
+                conn = HTTPS_CONNECTION(host, timeout=600, context=SSL_CTX)
+                conn.request(self.command, prefix + self.path, body=raw, headers=headers)
+                resp = conn.getresponse()
+                status = resp.status
+                error_body = resp.read(1_000_000) if status >= 400 else b""
             if status >= 400:
-                error_body = resp.read(1_000_000)
                 explanation = error_explainer.explain(lane, status, error_body)
                 self.respond_json(status, {"error": explanation})
                 conn.close()

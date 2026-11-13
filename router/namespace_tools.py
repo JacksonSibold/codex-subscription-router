@@ -18,6 +18,9 @@ from typing import Any
 # Namespaces passed through. Connector app namespaces (Gmail, Drive, ...) stay excluded:
 # they add ~100K tokens of schemas per request and some upstreams reject them.
 ALLOWED_PREFIXES = ("mcp__node_repl", "mcp__cua_repl")
+# Codex's built-in agent namespaces: subagents (spawn_agent, send_message, wait_agent, ...) and clock.
+AGENT_NAMESPACES = ("collaboration", "clock")
+FLATTEN_PREFIXES = ALLOWED_PREFIXES + AGENT_NAMESPACES
 VERSION = 1
 
 
@@ -31,7 +34,7 @@ def join_name(ns: str, name: str) -> str:
 
 def _flatten_group(group: dict[str, Any], mapping: dict[str, tuple[str, str]]) -> list[dict[str, Any]]:
     ns = group.get("name")
-    if not (isinstance(ns, str) and ns.startswith(ALLOWED_PREFIXES)):
+    if not (isinstance(ns, str) and ns.startswith(FLATTEN_PREFIXES)):
         return []
     out = []
     for child in group.get("tools") or []:

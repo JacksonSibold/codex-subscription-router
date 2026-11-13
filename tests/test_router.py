@@ -23,6 +23,17 @@ import usage_store
 
 
 class RouterTests(unittest.TestCase):
+    def test_claude_accepts_union_tool_schema_for_computer_use(self):
+        schema = {"type": "object", "anyOf": [
+            {"properties": {"code": {"type": "string"}}, "required": ["code"]},
+            {"properties": {"completion_summary": {"type": "string"}}, "required": ["completion_summary"]},
+        ]}
+        payload, _ = anthropic_adapter.build_payload({"tools": [{"type": "function", "name": "computer", "parameters": schema}]})
+        actual = payload["tools"][0]["input_schema"]
+        self.assertNotIn("anyOf", actual)
+        self.assertEqual(set(actual["properties"]), {"code", "completion_summary"})
+        self.assertEqual(actual.get("required", []), [])
+
     def test_usage_account_labels_follow_the_active_anthropic_credential_source(self):
         with patch.object(router.anthropic_oauth, "load_tokens", return_value={"access": "hidden"}):
             self.assertEqual(router.usage_account("anthropic"), router.USAGE_ACCOUNT_LABELS["anthropic"])
@@ -505,5 +516,111 @@ class RouterIntegrationTests(unittest.TestCase):
                 router.CODEX_HOME = original_home
 
 
+class OpenCodeTidyTests(unittest.TestCase):
+    def test_empty_call_id_borrows_item_id_for_call_and_output(self):
+        body = {"input": [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            {"type": "function_call", "id": "fc_1", "call_id": "", "name": "shell", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "", "output": "ok"},
+            {"type": "custom_tool_call", "call_id": None, "name": "apply_patch", "input": "x"},
+            {"type": "custom_tool_call_output", "call_id": "", "output": "done"},
+        ]}
+        self.assertTrue(router.tidy_for_opencode(body))
+        calls = [i for i in body["input"] if i["type"].endswith(("_call", "_call_output"))]
+        self.assertEqual([(i["type"], i["call_id"]) for i in calls],
+                         [("function_call", "fc_1"), ("function_call_output", "fc_1")])
+        self.assertEqual(body["input"][0]["type"], "message")
+
+    def test_hosted_items_and_orphan_outputs_are_dropped(self):
+        body = {"input": [
+            {"type": "web_search_call", "id": "ws_1", "status": "completed", "action": {"type": "search"}},
+            {"type": "tool_search_call", "id": "ts_1"},
+            {"type": "tool_search_output", "id": "ts_2", "tools": []},
+            {"type": "function_call_output", "call_id": "missing", "output": "orphan"},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        ]}
+        self.assertTrue(router.tidy_for_opencode(body))
+        self.assertEqual([i["type"] for i in body["input"]], ["message"])
+
+    def test_valid_call_ids_are_unchanged(self):
+        items = [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "shell", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+            {"type": "custom_tool_call", "call_id": "call_2", "name": "apply_patch", "input": "x"},
+            {"type": "custom_tool_call_output", "call_id": "call_2", "output": "done"},
+        ]
+        body = {"input": copy.deepcopy(items)}
+        self.assertFalse(router.tidy_for_opencode(body))
+        self.assertEqual(body["input"], items)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class AgentMessageTests(unittest.TestCase):
+    AGENT_MESSAGE = {
+        "type": "agent_message", "id": "am_1", "author": "/root", "recipient": "/root/worker",
+        "content": [{"type": "input_text", "text": "Reply with exactly: sub ok"},
+                    {"type": "encrypted_content", "encrypted_content": "opaque"}],
+    }
+
+    def test_subagent_task_reaches_claude(self):
+        body = {"model": "claude-sonnet-5-5", "input": [
+            {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "rules"}]},
+            copy.deepcopy(self.AGENT_MESSAGE),
+        ]}
+        payload, _ = router.anthropic_adapter.build_payload(body)
+        text = json.dumps(payload["messages"])
+        self.assertIn("Reply with exactly: sub ok", text)
+        self.assertIn("from /root", text)
+        self.assertNotIn("opaque", text)
+
+    def test_subagent_task_reaches_opencode_as_plain_message(self):
+        body = {"model": "deepseek-v4.1-flash", "input": [copy.deepcopy(self.AGENT_MESSAGE)]}
+        self.assertTrue(router.tidy_for_opencode(body))
+        [item] = body["input"]
+        self.assertEqual((item["type"], item["role"]), ("message", "user"))
+        self.assertIn("Reply with exactly: sub ok", item["content"][0]["text"])
+        self.assertNotIn("opaque", json.dumps(body))
+
+
+class PortableSchemaTests(unittest.TestCase):
+    def test_root_union_tool_schema_is_flattened_for_opencode(self):
+        schema = {"type": "object", "oneOf": [
+            {"properties": {"code": {"type": "string"}}, "required": ["code"]},
+            {"properties": {"file": {"type": "string"}}, "required": ["file"]},
+        ]}
+        body = {"model": "deepseek-v4.1-flash", "input": [], "tools": [
+            {"type": "function", "name": "mcp__cua_repl__js", "parameters": schema},
+            {"type": "function", "name": "ok", "parameters": {"type": "object", "properties": {}}},
+        ]}
+        self.assertTrue(router.tidy_for_opencode(body))
+        flat = body["tools"][0]["parameters"]
+        self.assertEqual(flat["type"], "object")
+        for key in router.TOP_LEVEL_SCHEMA_REJECTS:
+            self.assertNotIn(key, flat)
+        self.assertEqual(set(flat["properties"]), {"code", "file"})
+        self.assertEqual(body["tools"][1]["parameters"], {"type": "object", "properties": {}})
+
+
+class ExpiredReasoningRetryTests(unittest.TestCase):
+    ERROR = b'{"error":{"message":"Referenced reasoning item \'rs_1\' was not found or has expired."}}'
+
+    def body(self):
+        return {"model": "deepseek-v4.1-flash", "input": [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            {"type": "reasoning", "id": "rs_1", "summary": []},
+        ]}
+
+    def test_expired_reasoning_is_dropped_for_retry(self):
+        body = self.body()
+        raw = router.without_expired_reasoning(body, "opencode", 400, self.ERROR)
+        self.assertIsNotNone(raw)
+        self.assertEqual([i["type"] for i in json.loads(raw)["input"]], ["message"])
+
+    def test_other_errors_and_openai_lane_are_not_retried(self):
+        self.assertIsNone(router.without_expired_reasoning(self.body(), "openai", 400, self.ERROR))
+        self.assertIsNone(router.without_expired_reasoning(self.body(), "opencode", 400, b'{"error":"bad model"}'))
+        self.assertIsNone(router.without_expired_reasoning(self.body(), "opencode", 500, self.ERROR))

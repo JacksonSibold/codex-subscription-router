@@ -117,14 +117,54 @@ def _service_thread(role: str) -> threading.Thread:
     return thread
 
 
-def ensure_services() -> list[threading.Thread]:
+def _service_process(role: str) -> subprocess.Popen:
+    """Run a service in its own process so the GUI thread never competes with it for the GIL.
+
+    Inside the window process the router shared one interpreter with the WebKit/Cocoa main loop,
+    which added several seconds to every proxied request and grew worse over a long session.
+    """
+    if FROZEN:
+        command = [sys.executable, f"--{role}-child"]
+    else:
+        command = [sys.executable, str(Path(__file__).resolve()), f"--{role}-child"]
+    env = dict(os.environ, RELAY_PARENT_PID=str(os.getpid()))
+    return subprocess.Popen(
+        command,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+    )
+
+
+def _exit_with_parent() -> None:
+    """Stop a child service when the desktop app that started it goes away."""
+    parent = int(os.environ.get("RELAY_PARENT_PID") or 0)
+    if not parent:
+        return
+
+    def watch() -> None:
+        while True:
+            time.sleep(2)
+            try:
+                os.kill(parent, 0)
+            except ProcessLookupError:
+                os._exit(0)
+            except OSError:
+                pass
+
+    threading.Thread(target=watch, name="relay-parent-watch", daemon=True).start()
+
+
+def ensure_services() -> list:
     manager_port = int(os.environ["CODEX_ROUTER_MANAGER_PORT"])
     router_port = int(os.environ["CODEX_ROUTER_PORT"])
-    owned: list[threading.Thread] = []
+    owned: list = []
     try:
         _json_url(f"http://127.0.0.1:{router_port}/__router_health", timeout=1.0)
     except (OSError, ValueError, urllib.error.URLError):
-        owned.append(_service_thread("router"))
+        owned.append(_service_process("router"))
         _wait_json(f"http://127.0.0.1:{router_port}/__router_health", timeout=15)
     try:
         manager = _json_url(f"http://127.0.0.1:{manager_port}/api/health", timeout=1.0)
@@ -404,6 +444,7 @@ def run_window(controller: DesktopController) -> None:
 def _child(argument: str) -> None:
     root = SOURCE_ROOT if not FROZEN else RESOURCE_ROOT
     sys.path.insert(0, str(root / "router"))
+    _exit_with_parent()
     if argument == "--manager-child":
         import manager
 
@@ -491,7 +532,7 @@ def main(argv: list[str] | None = None) -> int:
         _ensure_first_run_startup()
     if _show_existing_instance():
         return 0
-    owned: list[threading.Thread] = []
+    owned: list = []
     try:
         owned = ensure_services()
     except Exception as exc:
@@ -516,6 +557,13 @@ def main(argv: list[str] | None = None) -> int:
         if server is not None:
             server.shutdown()
             server.server_close()
+        for service in owned:
+            if isinstance(service, subprocess.Popen):
+                try:
+                    service.terminate()
+                    service.wait(timeout=5)
+                except Exception:
+                    pass
     return 0
 
 

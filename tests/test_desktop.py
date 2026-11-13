@@ -43,10 +43,24 @@ class DesktopTests(unittest.TestCase):
         with patch.dict(os.environ, {"CODEX_ROUTER_MANAGER_PORT": "19001", "CODEX_ROUTER_PORT": "19002"}), \
              patch.object(relay_desktop, "_json_url", side_effect=[
                  {"relay_version": "1.1.0"}, {"ok": True},
-             ]), patch.object(relay_desktop, "_service_thread") as launch:
+             ]), patch.object(relay_desktop, "_service_thread") as launch, \
+             patch.object(relay_desktop, "_service_process") as spawn:
             owned = relay_desktop.ensure_services()
         self.assertEqual(owned, [])
         launch.assert_not_called()
+        spawn.assert_not_called()
+
+    def test_router_runs_in_its_own_process(self):
+        from urllib.error import URLError
+        with patch.dict(os.environ, {"CODEX_ROUTER_MANAGER_PORT": "19001", "CODEX_ROUTER_PORT": "19002"}), \
+             patch.object(relay_desktop, "_json_url", side_effect=[URLError("down"), {"ok": True}]), \
+             patch.object(relay_desktop, "_wait_json", return_value={}), \
+             patch.object(relay_desktop, "_service_thread") as launch, \
+             patch.object(relay_desktop, "_service_process") as spawn:
+            owned = relay_desktop.ensure_services()
+        spawn.assert_called_once_with("router")
+        launch.assert_not_called()
+        self.assertEqual(owned, [spawn.return_value])
 
     def test_window_geometry_stays_on_the_visible_screen(self):
         with patch.object(relay_desktop, "_codex_window_rect", return_value=None):
